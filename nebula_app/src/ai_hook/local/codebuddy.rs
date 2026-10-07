@@ -19,6 +19,10 @@ use serde_json::{Value, json};
 
 use crate::ai_hook::is_helper_shell_command;
 
+/// hook 条目的 timeout（秒）。与 claude/kimi hook 的取值保持一致；
+/// 条目一旦写入，用户手调过的值不会被自愈覆盖。
+const CODEBUDDY_HOOK_TIMEOUT: i64 = 10;
+
 /// 订阅的 CodeBuddy 事件，与 claude 对齐。其中 PermissionRequest、
 /// PostToolUseFailure、StopFailure 在 CodeBuddy 尚属未文档化事件，但其
 /// 内部 enum 已有对应派发点；上游若改名，这三个事件只会静默退化（收不到
@@ -36,8 +40,17 @@ const CODEBUDDY_EVENTS: [&str; 10] = [
     "SessionEnd",
 ];
 
-/// CodeBuddy 的配置目录。settings.json 固定在 `~/.codebuddy` 下。
-fn codebuddy_config_dir() -> Option<PathBuf> {
+/// CodeBuddy 的配置目录：`$CODEBUDDY_CONFIG_DIR`，否则 `~/.codebuddy`。
+/// 已对照 2.150.0 安装 bundle 核实：主目录解析按 `env 值非空 ? env :
+/// ~/.codebuddy`，settings.json 固定在其下（bundle 内 82 处引用一致）；
+/// 除本变量外没有其他 config 目录覆盖，`WORKBUDDY_CONFIG_DIR` 属于
+/// `.workbuddy` 另一套 home，与本目录无关。空值按未设置处理，与 bundle
+/// 语义一致。
+pub(super) fn codebuddy_config_dir() -> Option<PathBuf> {
+    match std::env::var_os("CODEBUDDY_CONFIG_DIR") {
+        Some(dir) if !dir.is_empty() => return Some(PathBuf::from(dir)),
+        _ => {},
+    }
     Some(crate::platform::dirs::home_dir()?.join(".codebuddy"))
 }
 
@@ -87,12 +100,38 @@ fn install_into(root: &mut Value, command: &str) -> Option<bool> {
             matchers.push(json!({"hooks": [{
                 "type": "command",
                 "command": desired_command,
-                "timeout": 10,
+                "timeout": CODEBUDDY_HOOK_TIMEOUT,
             }]}));
             changed = true;
         }
     }
     Some(changed)
+}
+
+/// 任一订阅事件挂着我们的条目即视为已安装。残缺的旧配置同样可见，
+/// 才能走 needs_repair 修复路径（与 claude 的 installed 语义一致）。
+fn installed_in(root: &Value) -> bool {
+    root.get("hooks").and_then(Value::as_object).is_some_and(|hooks| {
+        CODEBUDDY_EVENTS.iter().any(|event| {
+            hooks.get(*event).and_then(Value::as_array).is_some_and(|matchers| {
+                matchers.iter().any(|matcher| {
+                    matcher
+                        .get("hooks")
+                        .and_then(Value::as_array)
+                        .is_some_and(|entries| entries.iter().any(is_our_codebuddy_hook))
+                })
+            })
+        })
+    })
+}
+
+/// 设置页只读复用同一 JSON 规则，区分部分安装和完整配置。
+pub(super) fn inspect(raw: &str, helper: &str) -> std::io::Result<(bool, bool)> {
+    let mut root: Value =
+        serde_json::from_str(raw).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let installed = installed_in(&root);
+    let current = install_into(&mut root, helper) == Some(false);
+    Ok((installed, current))
 }
 
 /// 在 `path`（settings.json）上执行安装/自愈。返回是否写了文件。
@@ -152,18 +191,23 @@ fn ensure_codebuddy_hooks_in(path: &Path, command: &str) -> bool {
     }
 }
 
-/// 自愈/安装入口。目录不存在 = 没有使用 CodeBuddy 的足迹，不为它
-/// scaffold 配置树。返回是否写了文件。
-pub(super) fn ensure_codebuddy_hooks() -> bool {
-    let Some(dir) = codebuddy_config_dir() else { return false };
+/// 目录不存在 = 没有使用 CodeBuddy 的足迹，不为它 scaffold 配置树
+/// （与 kimi/pi/opencode 一致）。
+fn ensure_codebuddy_hooks_in_dir(dir: &Path, helper: &str) -> bool {
     if !dir.exists() {
         return false;
     }
+    ensure_codebuddy_hooks_in(&dir.join("settings.json"), helper)
+}
+
+/// 自愈/安装入口。返回是否写了文件。
+pub(super) fn ensure_codebuddy_hooks() -> bool {
+    let Some(dir) = codebuddy_config_dir() else { return false };
     let Some(helper) = super::helper_path() else { return false };
     // 与 claude/kimi 条目一致：Windows 路径统一成正斜杠。
     let helper = helper.to_string_lossy().into_owned();
     let helper = if cfg!(windows) { helper.replace('\\', "/") } else { helper };
-    let changed = ensure_codebuddy_hooks_in(&dir.join("settings.json"), &helper);
+    let changed = ensure_codebuddy_hooks_in_dir(&dir, &helper);
     if changed {
         super::announce();
     }
@@ -227,7 +271,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        CODEBUDDY_EVENTS, ensure_codebuddy_hooks_in, install_into, remove_codebuddy_hooks_in,
+        CODEBUDDY_EVENTS, CODEBUDDY_HOOK_TIMEOUT, ensure_codebuddy_hooks_in,
+        ensure_codebuddy_hooks_in_dir, install_into, is_our_codebuddy_hook,
+        remove_codebuddy_hooks_in,
     };
 
     const HELPER: &str = "C:/Program Files/Pebrel/runtime/pebrel-hook.exe";
@@ -246,7 +292,7 @@ mod tests {
             let entry = &root["hooks"][event][0]["hooks"][0];
             assert_eq!(entry["type"], json!("command"));
             assert_eq!(entry["command"], json!(desired_command()));
-            assert_eq!(entry["timeout"], json!(10));
+            assert_eq!(entry["timeout"].as_i64(), Some(CODEBUDDY_HOOK_TIMEOUT));
         }
         assert_eq!(install_into(&mut root, HELPER), Some(false), "二次安装必须幂等");
     }
@@ -273,6 +319,49 @@ mod tests {
         assert_eq!(install_into(&mut root, HELPER), Some(true));
         assert_eq!(root["enabledPlugins"], json!({"example": true}));
         assert_eq!(root["trustedDirectories"], json!(["/tmp"]));
+    }
+
+    /// 对照 claude 的同款 12 轮断言：外来条目（echo、组合命令、指向 helper
+    /// 但非完整调用的条目）在反复 install/remove 循环中字节不变，陈旧条目
+    /// 原位修复、无重复追加。
+    #[test]
+    fn install_and_remove_preserve_commands_that_only_mention_the_helper() {
+        let foreign = json!([
+            {"type": "command", "command": "echo hello"},
+            {"type": "command", "command": "echo pebrel-hook.exe"},
+            {"type": "command", "command": "echo 'C:/pebrel-hook.exe' codebuddy"},
+            {"type": "command", "command": "C:/pebrel-hook.exe.backup"},
+            {"type": "command", "command": HELPER},
+            {"type": "command", "command": format!("\"{HELPER}\" codebuddy && echo user")},
+        ]);
+        let stale = json!([{
+            "type": "command",
+            "command": "'D:/old/Nebula/runtime/nebula-hook.exe' codebuddy",
+            "timeout": 30,
+        }]);
+        let mut root = json!({"hooks": {"Stop": [{"hooks": foreign}, {"hooks": stale}]}});
+        // 第 0 轮：stale 条目原位修复，外来条目字节不变，无重复追加。
+        assert_eq!(install_into(&mut root, HELPER), Some(true));
+        let stop = root["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 2, "不得为同一事件追加第二条 hook");
+        assert_eq!(stop[0]["hooks"], foreign, "外来条目字节不变");
+        assert_eq!(stop[1]["hooks"].as_array().map(Vec::len), Some(1));
+        assert_eq!(stop[1]["hooks"][0]["command"], json!(desired_command()));
+        assert_eq!(stop[1]["hooks"][0]["timeout"].as_i64(), Some(30), "用户字段不动");
+        assert_eq!(install_into(&mut root, HELPER), Some(false));
+        assert!(super::remove_codebuddy_hooks_from(&mut root));
+        assert_eq!(root["hooks"]["Stop"], json!([{"hooks": foreign}]));
+        assert!(!super::remove_codebuddy_hooks_from(&mut root));
+        for _ in 0..12 {
+            assert_eq!(install_into(&mut root, HELPER), Some(true));
+            assert_eq!(root["hooks"]["Stop"][0]["hooks"], foreign);
+            let installed = root.clone();
+            assert_eq!(install_into(&mut root, HELPER), Some(false));
+            assert_eq!(root, installed);
+            assert!(super::remove_codebuddy_hooks_from(&mut root));
+            assert_eq!(root["hooks"]["Stop"], json!([{"hooks": foreign}]));
+            assert!(!super::remove_codebuddy_hooks_from(&mut root));
+        }
     }
 
     #[test]
@@ -421,14 +510,46 @@ mod tests {
         let path = temp.path().join("settings.json");
         assert!(ensure_codebuddy_hooks_in(&path, HELPER));
         assert!(remove_codebuddy_hooks_in(&path).unwrap());
-        let root: Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let root: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         for event in CODEBUDDY_EVENTS {
             let matchers = root["hooks"][event].as_array().expect("event key survives");
-            assert!(matchers.iter().all(|m| {
-                m.get("hooks").and_then(Value::as_array).is_none_or(|c| c.is_empty())
-            }), "我们的条目删净");
+            assert!(matchers.is_empty(), "我们的条目删净，matcher 一并清空");
         }
         assert!(!remove_codebuddy_hooks_in(&path).unwrap(), "第二遍无改动");
+    }
+
+    /// 路径含单引号时 quote() 按 `'\\''` 转义，归属判定必须能解回来，
+    /// 否则含 `'` 的安装路径装完即被判为外来条目、下次又追加一条。
+    #[test]
+    fn single_quoted_helper_paths_round_trip_through_the_ownership_check() {
+        let helper = "C:/Users/it's me/Pebrel/pebrel-hook.exe";
+        let mut root = json!({});
+        assert_eq!(install_into(&mut root, helper), Some(true));
+        let entry = &root["hooks"]["Stop"][0]["hooks"][0];
+        assert_eq!(
+            entry["command"],
+            json!("'C:/Users/it'\\''s me/Pebrel/pebrel-hook.exe' codebuddy")
+        );
+        assert!(is_our_codebuddy_hook(entry));
+        assert_eq!(install_into(&mut root, helper), Some(false), "判定为自有条目才幂等");
+    }
+
+    #[test]
+    fn broken_json_makes_removal_fail_loudly() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let broken = "{\"hooks\": ";
+        std::fs::write(&path, broken).unwrap();
+
+        assert!(remove_codebuddy_hooks_in(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+    }
+
+    #[test]
+    fn missing_directory_is_not_scaffolded() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("no-such-dir");
+        assert!(!ensure_codebuddy_hooks_in_dir(&dir, HELPER));
+        assert!(!dir.exists());
     }
 }

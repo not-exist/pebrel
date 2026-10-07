@@ -38,6 +38,10 @@ pub(super) fn configuration(agent: AgentHook) -> Option<(PathBuf, bool)> {
             let dir = kimi::kimi_config_dir()?;
             (dir.join("config.toml"), dir.is_dir())
         },
+        AgentHook::CodeBuddy => {
+            let dir = codebuddy::codebuddy_config_dir()?;
+            (dir.join("settings.json"), dir.is_dir())
+        },
         AgentHook::Cursor => {
             let path = cursor::path()?;
             let footprint = path.parent()?.is_dir();
@@ -120,6 +124,10 @@ fn installed_at(agent: AgentHook, path: &Path, helper: &str) -> io::Result<bool>
             let Some(raw) = read_optional(path)? else { return Ok(false) };
             Ok(kimi::inspect(&raw, Path::new(helper))?.0)
         },
+        AgentHook::CodeBuddy => {
+            let Some(raw) = read_optional(path)? else { return Ok(false) };
+            Ok(codebuddy::inspect(&raw, helper)?.0)
+        },
         AgentHook::Cursor => cursor::installed_at(path),
         AgentHook::OpenCode | AgentHook::Pi => {
             let bridge = if agent == AgentHook::Pi { Bridge::Pi } else { Bridge::Opencode };
@@ -139,6 +147,7 @@ fn current_at(agent: AgentHook, path: &Path, helper: &str) -> io::Result<bool> {
     match agent {
         AgentHook::Cursor => cursor::current(&raw, helper),
         AgentHook::Kimi => Ok(kimi::inspect(&raw, Path::new(helper))?.1),
+        AgentHook::CodeBuddy => Ok(codebuddy::inspect(&raw, helper)?.1),
         AgentHook::Claude => {
             let mut value: Value = serde_json::from_str(&raw).map_err(io::Error::other)?;
             Ok(install_into(&mut value, helper) == Some(false))
@@ -228,6 +237,9 @@ pub(super) fn apply(agent: AgentHook, enabled: bool) -> io::Result<()> {
         (AgentHook::Kimi, true) => {
             kimi::ensure_kimi_hooks();
         },
+        (AgentHook::CodeBuddy, true) => {
+            codebuddy::ensure_codebuddy_hooks();
+        },
         (AgentHook::Claude, false) => {
             remove_hooks()?;
         },
@@ -245,6 +257,9 @@ pub(super) fn apply(agent: AgentHook, enabled: bool) -> io::Result<()> {
         },
         (AgentHook::Kimi, false) => {
             kimi::remove_kimi_hooks()?;
+        },
+        (AgentHook::CodeBuddy, false) => {
+            codebuddy::remove_codebuddy_hooks()?;
         },
         (AgentHook::Cursor, _) => {
             let path = cursor::path()
@@ -323,5 +338,58 @@ mod tests {
         value["hooks"]["SessionStart"] = json!("invalid shape");
         std::fs::write(&path, value.to_string()).unwrap();
         assert!(!current_at(AgentHook::Claude, &path, helper).unwrap());
+    }
+
+    #[test]
+    fn codebuddy_installation_and_currency_track_settings_json_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let helper = "C:/Program Files/Pebrel/runtime/pebrel-hook.exe";
+        let command = format!("'{helper}' codebuddy");
+
+        // 只有外来条目：未安装。
+        std::fs::write(&path, r#"{"hooks":{"Stop":[{"hooks":[{"command":"echo hello"}]}]}}"#)
+            .unwrap();
+        assert!(!installed_at(AgentHook::CodeBuddy, &path, helper).unwrap());
+
+        // 条目存在但路径过期：已安装但不最新（needs_repair）。
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"'C:/old/pebrel-hook.exe' codebuddy"}]}]}}"#,
+        )
+        .unwrap();
+        assert!(installed_at(AgentHook::CodeBuddy, &path, helper).unwrap());
+        assert!(!current_at(AgentHook::CodeBuddy, &path, helper).unwrap());
+
+        // 完整条目（全部订阅事件都在）：已安装且最新。
+        let events = [
+            "SessionStart",
+            "UserPromptSubmit",
+            "Notification",
+            "PermissionRequest",
+            "PreToolUse",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "Stop",
+            "StopFailure",
+            "SessionEnd",
+        ];
+        let hooks = events
+            .iter()
+            .map(|event| {
+                (
+                    (*event).to_owned(),
+                    json!([{"hooks":[{"type":"command","command":command,"timeout":10}]}]),
+                )
+            })
+            .collect::<serde_json::Map<String, Value>>();
+        std::fs::write(&path, json!({"hooks": hooks}).to_string()).unwrap();
+        assert!(installed_at(AgentHook::CodeBuddy, &path, helper).unwrap());
+        assert!(current_at(AgentHook::CodeBuddy, &path, helper).unwrap());
+
+        // 坏 JSON：读检查报错，不静默判为未安装。
+        std::fs::write(&path, "broken JSON").unwrap();
+        assert!(installed_at(AgentHook::CodeBuddy, &path, helper).is_err());
+        assert!(current_at(AgentHook::CodeBuddy, &path, helper).is_err());
     }
 }
