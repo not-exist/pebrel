@@ -112,9 +112,10 @@ pub(crate) fn response(raw: &str) -> Result<Value, String> {
 
 impl Snapshot {
     /// WSL keeps its normal login shell. Only command hooks have a complete
-    /// transport there; plugin adapters currently need the SSH bootstrap env.
+    /// transport there; file-style hook settings (claude, codex, codebuddy)
+    /// pass, while plugin adapters currently need the SSH bootstrap env.
     pub(crate) fn for_wsl(mut self) -> Self {
-        self.providers.retain(|name, _| matches!(name.as_str(), "claude" | "codex"));
+        self.providers.retain(|name, _| matches!(name.as_str(), "claude" | "codex" | "codebuddy"));
         self
     }
 

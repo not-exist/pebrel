@@ -233,3 +233,19 @@ fn wsl_replaces_the_legacy_windows_helper_without_chaining_a_dead_executable() {
     assert_eq!(argv[1], "codex");
     assert!(!argv[0].contains(".exe"));
 }
+
+/// The WSL gate admits command hooks installed into plain settings files and
+/// drops plugin adapters, which still need the SSH bootstrap env. CodeBuddy
+/// belongs to the file-style class alongside claude and codex.
+#[test]
+fn wsl_retains_codebuddy_as_a_file_style_provider() {
+    let mut snapshot = snapshot();
+    snapshot.providers.insert("codebuddy".into(), true);
+    let wsl = snapshot.for_wsl();
+    for name in ["claude", "codex", "codebuddy"] {
+        assert!(wsl.present(name), "{name} installs command hooks into plain settings files");
+    }
+    for name in ["opencode", "pi"] {
+        assert!(!wsl.present(name), "{name} is a plugin adapter needing the SSH bootstrap env");
+    }
+}
