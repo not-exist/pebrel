@@ -930,7 +930,7 @@
     "fonts": "カスタムフォント"
   },
   "ai_hooks": {
-    "announced": "AI のターン通知を接続しました（Claude / Codex / Kimi / Pi / opencode）。取り消すには: pebrel setup-ai --remove"
+    "announced": "AI のターン通知を接続しました（Claude / Codex / Kimi / Pi / opencode / CodeBuddy）。取り消すには: pebrel setup-ai --remove"
   },
   "notification.command_finished": "コマンドが完了しました（{seconds} 秒）",
   "notification.command_failed": "コマンドが失敗しました（終了コード {code}、{seconds} 秒）",

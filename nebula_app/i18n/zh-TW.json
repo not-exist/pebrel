@@ -943,7 +943,7 @@
     "fonts": "自訂字型"
   },
   "ai_hooks": {
-    "announced": "已啟用 AI 回合通知（Claude / Codex / Kimi / Pi / opencode）。移除方式：pebrel setup-ai --remove"
+    "announced": "已啟用 AI 回合通知（Claude / Codex / Kimi / Pi / opencode / CodeBuddy）。移除方式：pebrel setup-ai --remove"
   },
   "notification.command_finished": "命令已結束，耗時 {seconds} 秒",
   "notification.command_failed": "命令失敗（結束碼 {code}），耗時 {seconds} 秒",
