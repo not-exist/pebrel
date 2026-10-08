@@ -207,20 +207,24 @@ impl Snapshot {
         let helper = &self.file("pebrel-hook")?.path;
         if self.present("claude") {
             let command = format!("{} claude", quote(helper));
-            let groups = CLAUDE_EVENTS.into_iter().map(|event| {
-                (event.to_owned(), json!([{"matcher":"", "hooks":[{"type":"command", "command":command, "timeout":3}]}]))
-            }).collect::<serde_json::Map<_, _>>();
-            self.merge_provider(manifest, edits, "claude", Value::Object(groups))?;
+            self.merge_provider(
+                manifest,
+                edits,
+                "claude",
+                installation::command_groups(&CLAUDE_EVENTS, &command),
+            )?;
         }
         // CodeBuddy is file-style like claude: command hooks in settings.json,
         // no plugin asset. The remote helper budget keeps every hook timeout
-        // at 3, matching claude — not the local adapter's 10.
+        // at REMOTE_HOOK_TIMEOUT, matching claude — not the local adapter's 10.
         if self.present("codebuddy") {
             let command = format!("{} codebuddy", quote(helper));
-            let groups = CODEBUDDY_EVENTS.into_iter().map(|event| {
-                (event.to_owned(), json!([{"matcher":"", "hooks":[{"type":"command", "command":command, "timeout":3}]}]))
-            }).collect::<serde_json::Map<_, _>>();
-            self.merge_provider(manifest, edits, "codebuddy", Value::Object(groups))?;
+            self.merge_provider(
+                manifest,
+                edits,
+                "codebuddy",
+                installation::command_groups(&CODEBUDDY_EVENTS, &command),
+            )?;
         }
         if self.present("codex") {
             self.install_codex(manifest, edits, helper)?;

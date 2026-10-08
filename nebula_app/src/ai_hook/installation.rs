@@ -79,6 +79,21 @@ pub(crate) fn codex_groups(
     Value::Object(groups)
 }
 
+/// The remote helper budget keeps every hook timeout at 3, matching the
+/// claude contract — not the local adapters' 10.
+pub(crate) const REMOTE_HOOK_TIMEOUT: i64 = 3;
+
+/// File-style command hooks (claude, codebuddy) share one group shape: an
+/// empty matcher with a single command handler per event.
+pub(crate) fn command_groups(events: &[&str], command: &str) -> Value {
+    Value::Object(events.iter().map(|event| {
+        (
+            (*event).to_owned(),
+            json!([{"matcher":"", "hooks":[{"type":"command","command":command,"timeout":REMOTE_HOOK_TIMEOUT}]}]),
+        )
+    }).collect())
+}
+
 /// The marker records exact groups we installed. Never claim a group merely
 /// because a command contains our product name. Edited groups remain untouched.
 pub(crate) fn merge_groups(

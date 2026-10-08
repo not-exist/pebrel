@@ -254,7 +254,12 @@ fn wsl_retains_codebuddy_as_a_file_style_provider() {
         .iter()
         .find(|edit| edit.name == "codebuddy")
         .expect("guest codebuddy hooks are planned without the SSH bootstrap env");
-    assert!(installed.content.as_deref().unwrap_or_default().contains("codebuddy"));
+    let settings: Value =
+        serde_json::from_str(installed.content.as_deref().unwrap_or_default()).unwrap();
+    assert_eq!(
+        settings["hooks"]["Stop"][0]["hooks"][0]["command"],
+        json!("'/home/a b/'\\''user/pebrel-hook' codebuddy")
+    );
 }
 
 /// CodeBuddy merges the same command-group shape as claude into its
