@@ -41,14 +41,16 @@ const CODEBUDDY_EVENTS: [&str; 10] = [
 ];
 
 /// CodeBuddy 的配置目录：`$CODEBUDDY_CONFIG_DIR`，否则 `~/.codebuddy`。
-/// 已对照 2.150.0 安装 bundle 核实：主目录解析按 `env 值非空 ? env :
-/// ~/.codebuddy`，settings.json 固定在其下（bundle 内 82 处引用一致）；
-/// 除本变量外没有其他 config 目录覆盖，`WORKBUDDY_CONFIG_DIR` 属于
-/// `.workbuddy` 另一套 home，与本目录无关。空值按未设置处理，与 bundle
-/// 语义一致。
+/// 已对照 2.150.0 安装 bundle 核实：主导解析模式为 trim 判空、非空原值
+/// 作路径（个别调用点连 trim 都没有），settings.json 固定在其下；除本
+/// 变量外没有其他 config 目录覆盖，`WORKBUDDY_CONFIG_DIR` 属于
+/// `.workbuddy` 另一套 home，与本目录无关。trim 后为空按未设置处理，
+/// 与 bundle 主导语义一致。
 pub(super) fn codebuddy_config_dir() -> Option<PathBuf> {
     match std::env::var_os("CODEBUDDY_CONFIG_DIR") {
-        Some(dir) if !dir.is_empty() => return Some(PathBuf::from(dir)),
+        Some(dir) if !dir.to_string_lossy().trim().is_empty() => {
+            return Some(PathBuf::from(dir));
+        },
         _ => {},
     }
     Some(crate::platform::dirs::home_dir()?.join(".codebuddy"))
