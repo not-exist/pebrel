@@ -56,13 +56,23 @@ pub(super) fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
         // Codex labels that context explicitly, even in the same OS process.
         return None;
     }
+    if source == "codebuddy"
+        && ["agent_id", "agent_type"]
+            .iter()
+            .any(|key| payload.get(*key).and_then(Value::as_str).is_some_and(|id| !id.is_empty()))
+    {
+        // CodeBuddy 的子代理事件共享父 session_id，却不能终结或替换主回合，
+        // 即使它们跑在同一个 OS 进程里（与 codex 的处理一致）。
+        return None;
+    }
     // 会话身份的候选字段名按 source 收紧。claude 每个 hook 载荷都带
-    // `session_id`（snake_case）；codex notify 带 `thread-id`（kebab-case，即
-    // rollout uuid）。**claude 分支绝不读 camelCase**：那是别家 hook runner 的
+    // `session_id`（snake_case）；codebuddy 的 stdin 载荷同形，同样只认
+    // snake_case；codex notify 带 `thread-id`（kebab-case，即 rollout uuid）。
+    // **claude/codebuddy 分支绝不读 camelCase**：那是别家 hook runner 的
     // 写法，把它的 session id 当成 claude 的，就会把一个不存在的会话交给
     // `claude --resume`（见 nebula_hook 的 FOREIGN_HOOK_RUNNERS 注释）。
     let session_id_keys: &[&str] = match source.as_str() {
-        "claude" | "kimi" => &["session_id"],
+        "claude" | "codebuddy" | "kimi" => &["session_id"],
         "codex" if native_codex => &["session_id"],
         "codex" => &["thread-id"],
         "cursor" => &["conversation_id", "session_id"],
@@ -77,7 +87,7 @@ pub(super) fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())
         .map(|id| truncate(id, ID_MAX_CHARS));
-    let native_transcript = matches!(source.as_str(), "claude" | "codex")
+    let native_transcript = matches!(source.as_str(), "claude" | "codebuddy" | "codex")
         .then(|| payload.get("transcript_path"))
         .flatten();
     let session_file = native_transcript
@@ -137,6 +147,39 @@ pub(super) fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
                 (AiHookKind::NeedsAttention, attention_message(&payload))
             },
             // SubagentStop and friends would only produce noise.
+            _ => return None,
+        },
+        // codebuddy 的第二道串台门，与 claude 同理：nebula_hook 里的第一道门
+        // 靠环境变量认调用方，会被上游改名静默失效，所以这里按载荷形状独立
+        // 再拦一次——claude runner 的 camelCase 载荷若被混装成 codebuddy
+        // 上报，绝不能落进下面这套映射。
+        "codebuddy" if payload.get("hookEventName").is_some() => return None,
+        // codebuddy 的载荷与 claude 同构（snake_case hook_event_name），语义
+        // 逐项对齐 claude 分支：工具边界归 ToolComplete，只有提问工具、权限
+        // 请求和可操作通知才打断用户。
+        "codebuddy" => match payload.get("hook_event_name").and_then(Value::as_str) {
+            Some("SessionStart") => (AiHookKind::SessionStart, None),
+            Some("UserPromptSubmit") => (AiHookKind::PromptSubmit, None),
+            Some("PreToolUse")
+                if payload.get("tool_name").and_then(Value::as_str) == Some("AskUserQuestion") =>
+            {
+                (AiHookKind::NeedsAttention, attention_message(&payload))
+            },
+            Some("PreToolUse" | "PostToolUse" | "PostToolUseFailure") => {
+                (AiHookKind::ToolComplete, None)
+            },
+            Some("Stop") => (AiHookKind::TurnDone, None),
+            Some("StopFailure") => (AiHookKind::TurnDone, context_string(&payload, &["error"])),
+            Some("SessionEnd") => (AiHookKind::SessionEnd, None),
+            // 与 claude 同一扇门：类型不可操作的通知（心跳、说话、任务状态）
+            // 丢掉，读不到类型时照常上报。
+            Some("Notification") if !attention_is_actionable(&payload) => return None,
+            Some("Notification") | Some("PermissionRequest") => {
+                (AiHookKind::NeedsAttention, attention_message(&payload))
+            },
+            // SubagentStop/PreCompact/PostCompact 等只是过程噪音：子代理上下文
+            // 已被上面的 agent_id 门拦下，压缩类事件不改变回合状态，放行只会
+            // 让 pane 停在清不掉的状态上。
             _ => return None,
         },
         "codex" if native_codex => match payload.get("hook_event_name").and_then(Value::as_str) {
@@ -213,7 +256,7 @@ pub(super) fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
     if source == "codex" && kind == AiHookKind::TurnDone && event_id.is_none() {
         event_id = turn_id.as_ref().map(|id| format!("codex:turn:{id}:done"));
     }
-    let turn_outcome = if matches!(source.as_str(), "claude" | "kimi")
+    let turn_outcome = if matches!(source.as_str(), "claude" | "codebuddy" | "kimi")
         && kind == AiHookKind::TurnDone
     {
         match payload.get("hook_event_name").and_then(Value::as_str) {

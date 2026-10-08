@@ -2,7 +2,9 @@
 use super::ordering::AiHookEventGate;
 use super::payload::RAW_CONTEXT_MAX_BYTES;
 
-use super::{AiHookKind, GateVerdict, capabilities_for, parse_remote_envelope, reorder_batch};
+use super::{
+    AiHookKind, AiTurnOutcome, GateVerdict, capabilities_for, parse_remote_envelope, reorder_batch,
+};
 
 #[test]
 fn remote_envelope_uses_local_pane_identity() {
@@ -517,6 +519,131 @@ fn kimi_permission_result_resumes_a_blocked_stream() {
 #[test]
 fn kimi_capabilities_are_declared() {
     let capabilities = capabilities_for("kimi");
+    assert!(capabilities.attention_context);
+    assert!(!capabilities.background_tasks);
+    assert!(!capabilities.bridge_sequence);
+    assert!(!capabilities.serialized_delivery);
+}
+
+/// codebuddy 的载荷与 claude 同构（snake_case `hook_event_name`），事件语义
+/// 逐项对齐共享生命周期：工具边界归 ToolComplete，只有提问工具、权限请求
+/// 和可操作通知才打断用户；Stop/StopFailure 是回合终态。
+#[test]
+fn codebuddy_events_map_to_the_shared_lifecycle() {
+    // Stop 是回合终态，session_id 供冷恢复使用；stop_hook_active 等其余
+    // 字段照例不参与映射。
+    let raw = br#"nebula-hook/1 source=codebuddy pane=3
+{"hook_event_name":"Stop","session_id":"cb-session-1","stop_hook_active":false}"#;
+    let event = parse_remote_envelope(raw, Some(3)).unwrap();
+    assert_eq!(event.kind, AiHookKind::TurnDone);
+    assert_eq!(event.session_id.as_deref(), Some("cb-session-1"));
+
+    for (name, expected) in [
+        ("SessionStart", AiHookKind::SessionStart),
+        ("UserPromptSubmit", AiHookKind::PromptSubmit),
+        ("PostToolUse", AiHookKind::ToolComplete),
+        ("PostToolUseFailure", AiHookKind::ToolComplete),
+        ("SessionEnd", AiHookKind::SessionEnd),
+    ] {
+        let raw =
+            format!("nebula-hook/1 source=codebuddy pane=3\n{{\"hook_event_name\":\"{name}\"}}");
+        let event = parse_remote_envelope(raw.as_bytes(), Some(3)).unwrap();
+        assert_eq!(event.kind, expected, "{name}");
+    }
+
+    // PreToolUse 的特判只认提问工具；普通工具是工具边界，不点亮等待徽标。
+    let plain_tool = b"nebula-hook/1 source=codebuddy pane=3\n{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\"}";
+    assert_eq!(parse_remote_envelope(plain_tool, Some(3)).unwrap().kind, AiHookKind::ToolComplete);
+    let question = b"nebula-hook/1 source=codebuddy pane=3\n{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"AskUserQuestion\"}";
+    assert_eq!(parse_remote_envelope(question, Some(3)).unwrap().kind, AiHookKind::NeedsAttention);
+
+    // PermissionRequest 表示「现在需要用户」。
+    let raw = b"nebula-hook/1 source=codebuddy pane=9\n{\"hook_event_name\":\"PermissionRequest\",\"tool_name\":\"Bash\",\"cwd\":\"/work/cb\"}";
+    let event = parse_remote_envelope(raw, Some(9)).unwrap();
+    assert_eq!(event.kind, AiHookKind::NeedsAttention);
+    let context = event.attention.as_ref().unwrap();
+    assert_eq!(context.permission_or_tool.as_deref(), Some("Bash"));
+    assert_eq!(context.cwd.as_deref(), Some("/work/cb"));
+
+    // Notification 经与 claude 同一扇类型门：可操作类型与读不到类型的通知
+    // 照常上报，明确不可操作的（agent 在说话、后台状态变更）丢弃。
+    for (extra, expected) in [
+        (r#","notification_type":"permission_prompt""#, Some(AiHookKind::NeedsAttention)),
+        (r#","notification_type":"assistant_message""#, None),
+        ("", Some(AiHookKind::NeedsAttention)),
+    ] {
+        let raw = format!(
+            "nebula-hook/1 source=codebuddy pane=3\n{{\"hook_event_name\":\"Notification\"{extra}}}"
+        );
+        assert_eq!(
+            parse_remote_envelope(raw.as_bytes(), Some(3)).map(|event| event.kind),
+            expected,
+            "{extra}"
+        );
+    }
+}
+
+/// 订阅集之外的事件一律丢弃：压缩/子代理收尾只是过程噪音，放行会让 pane
+/// 状态被无意义事件触碰，甚至停在一个清不掉的等待图标上。
+#[test]
+fn codebuddy_process_noise_is_dropped() {
+    for name in ["PreCompact", "PostCompact", "SessionHeartbeat"] {
+        let raw =
+            format!("nebula-hook/1 source=codebuddy pane=3\n{{\"hook_event_name\":\"{name}\"}}");
+        assert!(parse_remote_envelope(raw.as_bytes(), Some(3)).is_none(), "{name} must be dropped");
+    }
+}
+
+/// 串台门的第二层对 codebuddy 同样成立。nebula_hook 的第一道门靠环境变量
+/// 认调用方，会被上游改名静默失效；这里钉住「即使那扇门不响，载荷形状仍
+/// 然拦得住」——claude runner 的 camelCase 载荷被混装成 source=codebuddy
+/// 时整包拒收，snake_case 载荷里混进的 camelCase session id 也绝不读。
+#[test]
+fn codebuddy_rejects_camel_case_runner_payloads() {
+    let raw = b"nebula-hook/1 source=codebuddy pane=3\n{\"hookEventName\":\"Stop\",\"sessionId\":\"claude-runner-1\",\"cwd\":\"D:/x\"}";
+    assert!(parse_remote_envelope(raw, Some(3)).is_none());
+
+    let raw = b"nebula-hook/1 source=codebuddy pane=3\n{\"hook_event_name\":\"Stop\",\"sessionId\":\"claude-runner-1\"}";
+    let event = parse_remote_envelope(raw, Some(3)).unwrap();
+    assert_eq!(event.kind, AiHookKind::TurnDone);
+    assert_eq!(event.session_id, None);
+}
+
+/// 子代理事件共享父 session 身份，却不能终结或替换主回合：codebuddy 用
+/// agent_id/agent_type 标注子代理上下文，带任一字段的事件整包拒收
+/// （与 codex 的处理一致）。
+#[test]
+fn codebuddy_subagent_events_cannot_drive_the_primary_turn() {
+    for name in ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "Notification"] {
+        let raw = format!(
+            "nebula-hook/1 source=codebuddy pane=3\n{{\"hook_event_name\":\"{name}\",\"session_id\":\"main\",\"agent_id\":\"child\",\"agent_type\":\"worker\"}}"
+        );
+        assert!(parse_remote_envelope(raw.as_bytes(), Some(3)).is_none(), "{name}");
+    }
+    // 上游任一注入点都可能单独出现，只带一个字段同样拒收。
+    let raw = b"nebula-hook/1 source=codebuddy pane=3\n{\"hook_event_name\":\"Stop\",\"session_id\":\"main\",\"agent_type\":\"worker\"}";
+    assert!(parse_remote_envelope(raw, Some(3)).is_none());
+}
+
+/// Stop 是成功收尾；StopFailure 是失败收尾并携带错误文本，供失败通知使用。
+#[test]
+fn codebuddy_stop_outcomes_classify_the_finished_turn() {
+    let raw = b"nebula-hook/1 source=codebuddy pane=3\n{\"hook_event_name\":\"Stop\"}";
+    let event = parse_remote_envelope(raw, Some(3)).unwrap();
+    assert_eq!(event.turn_outcome, AiTurnOutcome::Succeeded);
+
+    let raw = b"nebula-hook/1 source=codebuddy pane=3\n{\"hook_event_name\":\"StopFailure\",\"error\":\"rate_limit\"}";
+    let event = parse_remote_envelope(raw, Some(3)).unwrap();
+    assert_eq!(event.kind, AiHookKind::TurnDone);
+    assert_eq!(event.turn_outcome, AiTurnOutcome::Failed);
+    assert_eq!(event.message.as_deref(), Some("rate_limit"));
+}
+
+#[test]
+fn codebuddy_capabilities_are_declared() {
+    let capabilities = capabilities_for("codebuddy");
+    assert!(capabilities.lifecycle);
+    assert!(capabilities.attention_events);
     assert!(capabilities.attention_context);
     assert!(!capabilities.background_tasks);
     assert!(!capabilities.bridge_sequence);

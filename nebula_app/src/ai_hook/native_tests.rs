@@ -372,3 +372,91 @@ fn claude_question_tool_failure_and_terminal_failure_have_distinct_effects() {
     activity.apply_hook(&success);
     assert_eq!(activity.status(), AgentStatus::Done);
 }
+
+/// codebuddy 的能力档位与 claude/kimi 同级（Lifecycle 覆盖）：hook 事件
+/// 驱动整条状态机，屏幕观察退为禁用——漏认档位会让屏幕扫描越权接管。
+#[test]
+fn codebuddy_hooks_drive_the_full_lifecycle() {
+    let parse = |payload: Value| {
+        parse_remote_envelope(
+            format!("nebula-hook/1 source=codebuddy pane=90\n{payload}").as_bytes(),
+            Some(90),
+        )
+        .unwrap()
+    };
+    let mut activity = AgentActivity::default();
+    let start = parse(json!({"hook_event_name":"SessionStart","session_id":"cb-1"}));
+    assert!(start.capabilities().lifecycle && start.capabilities().attention_events);
+    assert!(activity.apply_hook(&start));
+    assert_eq!(activity.status(), AgentStatus::Idle);
+    assert_eq!(activity.source(), AgentStatusSource::Hook);
+
+    assert!(
+        activity
+            .apply_hook(&parse(json!({"hook_event_name":"UserPromptSubmit","session_id":"cb-1"})))
+    );
+    assert_eq!(activity.status(), AgentStatus::Working);
+
+    let blocked = parse(
+        json!({"hook_event_name":"PermissionRequest","session_id":"cb-1","tool_name":"Bash","permission_mode":"default"}),
+    );
+    assert!(activity.apply_hook(&blocked));
+    assert_eq!(activity.status(), AgentStatus::Blocked);
+    assert!(!activity.allows_screen());
+
+    assert!(
+        activity.apply_hook(&parse(json!({"hook_event_name":"PostToolUse","session_id":"cb-1"})))
+    );
+    assert_eq!(activity.status(), AgentStatus::Working);
+
+    // AskUserQuestion 同样把 pane 拉回 Blocked，工具答复后恢复 Working。
+    let question = parse(json!({"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion"}));
+    assert_eq!(question.kind, AiHookKind::NeedsAttention);
+    assert!(activity.apply_hook(&question));
+    assert_eq!(activity.status(), AgentStatus::Blocked);
+    assert!(
+        activity.apply_hook(&parse(json!({"hook_event_name":"PostToolUse","session_id":"cb-1"})))
+    );
+    assert_eq!(activity.status(), AgentStatus::Working);
+
+    let done = parse(json!({"hook_event_name":"Stop","session_id":"cb-1"}));
+    assert_eq!(done.turn_outcome, AiTurnOutcome::Succeeded);
+    assert!(activity.apply_hook(&done));
+    assert_eq!(activity.status(), AgentStatus::Done);
+
+    assert!(
+        activity.apply_hook(&parse(json!({"hook_event_name":"SessionEnd","session_id":"cb-1"})))
+    );
+    assert!(!activity.hook_seen());
+}
+
+/// StopFailure 必须以失败通知收尾：错误文本走通用 error 字段提取，
+/// 成功的 Stop 才允许弹出完成通知。
+#[test]
+fn codebuddy_failure_does_not_announce_success() {
+    let failed = parse_remote_envelope(
+        br#"nebula-hook/1 source=codebuddy pane=3
+{"hook_event_name":"StopFailure","session_id":"cb-1","error":"rate_limit"}"#,
+        Some(3),
+    )
+    .unwrap();
+    assert_eq!(failed.turn_outcome, AiTurnOutcome::Failed);
+    let notification =
+        crate::notify::Notification::from_ai_hook(&failed, failed.message.clone(), false).unwrap();
+    assert!(notification.is_failure());
+    assert_eq!(failed.message.as_deref(), Some("rate_limit"));
+}
+
+#[test]
+fn codebuddy_transcript_is_retained_without_changing_its_native_session_id() {
+    let event = parse_remote_envelope(
+        b"nebula-hook/1 source=codebuddy\n{\"hook_event_name\":\"SessionStart\",\"session_id\":\"cb-id\",\"transcript_path\":\"/home/user/.codebuddy/projects/project/cb-id.jsonl\"}",
+        Some(91),
+    )
+    .unwrap();
+    assert_eq!(event.session_id.as_deref(), Some("cb-id"));
+    assert_eq!(
+        event.session_file.as_deref(),
+        Some("/home/user/.codebuddy/projects/project/cb-id.jsonl")
+    );
+}
