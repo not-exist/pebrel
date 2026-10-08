@@ -434,10 +434,11 @@ mod tests {
         );
     }
 
-    /// kimi 与 claude 共用 stdin 载荷通道，但信封头签自己的 source——Nebula 侧
-    /// 靠这个字段把载荷路由给 kimi 的解析分支，签错名字会被静默丢弃。
+    /// claude/kimi/codebuddy 等 stdin 源共用载荷通道，但信封头签各自的
+    /// source——Nebula 侧靠这个字段把载荷路由给对应解析分支，签错名字会被
+    /// 静默丢弃。信封演示以 kimi 载荷为例。
     #[test]
-    fn kimi_reads_stdin_and_signs_its_own_envelope() {
+    fn stdin_sources_sign_envelopes_with_their_own_source() {
         for source in ["claude", "codex", "opencode", "pi", "kimi", "codebuddy"] {
             assert!(super::known_source(source), "{source} 必须仍在白名单里");
         }
