@@ -116,6 +116,10 @@ const CLAUDE_EVENTS: [&str; 10] = [
 ];
 
 /// 订阅的 CodeBuddy 事件，与 claude 对齐（本地与远端安装共用这份清单）。
+/// CodeBuddy 上游文档将 hooks 整体标注为 Beta（自 v1.16.0 起），其安装
+/// bundle 无任何 Beta 字样——契约可能随上游演进，每次升级 CodeBuddy 后
+/// 应对照其文档复核本清单与 `nebula_app/src/ai_hook/local/codebuddy.rs`
+/// 的合并语义。
 /// 其中 PermissionRequest、PostToolUseFailure、StopFailure 在 CodeBuddy
 /// 尚属未文档化事件，但其内部 enum 已有对应派发点；上游若改名，这三个
 /// 事件只会静默退化（收不到转发），不影响其余事件的接线——该取舍已确认
