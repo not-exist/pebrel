@@ -62,7 +62,8 @@ pub(super) fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
             .any(|key| payload.get(*key).and_then(Value::as_str).is_some_and(|id| !id.is_empty()))
     {
         // CodeBuddy 的子代理事件共享父 session_id，却不能终结或替换主回合，
-        // 即使它们跑在同一个 OS 进程里（与 codex 的处理一致）。
+        // 即使它们跑在同一个 OS 进程里（与 codex 的处理一致）：带非空
+        // agent_id/agent_type 标注的子代理上下文在此整包拦下，空串视为未标注。
         return None;
     }
     // 会话身份的候选字段名按 source 收紧。claude 每个 hook 载荷都带
@@ -124,9 +125,12 @@ pub(super) fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
     let (kind, message) = match source.as_str() {
         // 第二道串台门。第一道在 nebula_hook 里靠环境变量判断调用方是不是别家
         // 的 hook runner；那种门会被上游改名静默失效，所以这里独立再拦一次：
-        // 别家 runner 的载荷用 camelCase 字段名，claude 从不这样发。
-        "claude" if payload.get("hookEventName").is_some() => return None,
-        "claude" => match payload.get("hook_event_name").and_then(Value::as_str) {
+        // 别家 runner 的载荷用 camelCase 字段名，claude/codebuddy 从不这样发，
+        // 混装上报时绝不能落进下面这套映射。
+        "claude" | "codebuddy" if payload.get("hookEventName").is_some() => return None,
+        // 两者的载荷同构（snake_case `hook_event_name`），语义逐项对齐：工具
+        // 边界归 ToolComplete，只有提问工具、权限请求和可操作通知才打断用户。
+        "claude" | "codebuddy" => match payload.get("hook_event_name").and_then(Value::as_str) {
             Some("SessionStart") => (AiHookKind::SessionStart, None),
             Some("UserPromptSubmit") => (AiHookKind::PromptSubmit, None),
             Some("PreToolUse")
@@ -141,45 +145,14 @@ pub(super) fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
             Some("StopFailure") => (AiHookKind::TurnDone, context_string(&payload, &["error"])),
             Some("SessionEnd") => (AiHookKind::SessionEnd, None),
             // `Notification` 覆盖「权限询问」和「idle 提醒」两类，将来也可能
-            // 用来传别的东西。类型不可操作时丢掉，读不到类型时照常上报。
+            // 用来传别的东西。类型不可操作时（心跳、说话、任务状态）丢掉，
+            // 读不到类型时照常上报。
             Some("Notification") if !attention_is_actionable(&payload) => return None,
             Some("Notification") | Some("PermissionRequest") => {
                 (AiHookKind::NeedsAttention, attention_message(&payload))
             },
-            // SubagentStop and friends would only produce noise.
-            _ => return None,
-        },
-        // codebuddy 的第二道串台门，与 claude 同理：nebula_hook 里的第一道门
-        // 靠环境变量认调用方，会被上游改名静默失效，所以这里按载荷形状独立
-        // 再拦一次——claude runner 的 camelCase 载荷若被混装成 codebuddy
-        // 上报，绝不能落进下面这套映射。
-        "codebuddy" if payload.get("hookEventName").is_some() => return None,
-        // codebuddy 的载荷与 claude 同构（snake_case hook_event_name），语义
-        // 逐项对齐 claude 分支：工具边界归 ToolComplete，只有提问工具、权限
-        // 请求和可操作通知才打断用户。
-        "codebuddy" => match payload.get("hook_event_name").and_then(Value::as_str) {
-            Some("SessionStart") => (AiHookKind::SessionStart, None),
-            Some("UserPromptSubmit") => (AiHookKind::PromptSubmit, None),
-            Some("PreToolUse")
-                if payload.get("tool_name").and_then(Value::as_str) == Some("AskUserQuestion") =>
-            {
-                (AiHookKind::NeedsAttention, attention_message(&payload))
-            },
-            Some("PreToolUse" | "PostToolUse" | "PostToolUseFailure") => {
-                (AiHookKind::ToolComplete, None)
-            },
-            Some("Stop") => (AiHookKind::TurnDone, None),
-            Some("StopFailure") => (AiHookKind::TurnDone, context_string(&payload, &["error"])),
-            Some("SessionEnd") => (AiHookKind::SessionEnd, None),
-            // 与 claude 同一扇门：类型不可操作的通知（心跳、说话、任务状态）
-            // 丢掉，读不到类型时照常上报。
-            Some("Notification") if !attention_is_actionable(&payload) => return None,
-            Some("Notification") | Some("PermissionRequest") => {
-                (AiHookKind::NeedsAttention, attention_message(&payload))
-            },
-            // SubagentStop/PreCompact/PostCompact 等只是过程噪音：子代理上下文
-            // 已被上面的 agent_id 门拦下，压缩类事件不改变回合状态，放行只会
-            // 让 pane 停在清不掉的状态上。
+            // SubagentStop/PreCompact/PostCompact 等只是过程噪音：压缩类事件
+            // 不改变回合状态，放行只会让 pane 停在清不掉的状态上。
             _ => return None,
         },
         "codex" if native_codex => match payload.get("hook_event_name").and_then(Value::as_str) {
@@ -342,7 +315,7 @@ pub(super) fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
         turn_id,
         session_compacted: kind == AiHookKind::SessionStart
             && payload.get("source").and_then(Value::as_str) == Some("compact"),
-        legacy_attention: source == "claude"
+        legacy_attention: matches!(source.as_str(), "claude" | "codebuddy")
             && payload.get("hook_event_name").and_then(Value::as_str) == Some("Notification")
             && context_string(&payload, &["notificationType", "notification_type"]).is_none(),
         answer,

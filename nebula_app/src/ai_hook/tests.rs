@@ -587,7 +587,7 @@ fn codebuddy_events_map_to_the_shared_lifecycle() {
 /// 状态被无意义事件触碰，甚至停在一个清不掉的等待图标上。
 #[test]
 fn codebuddy_process_noise_is_dropped() {
-    for name in ["PreCompact", "PostCompact", "SessionHeartbeat"] {
+    for name in ["PreCompact", "PostCompact", "SessionHeartbeat", "SubagentStop"] {
         let raw =
             format!("nebula-hook/1 source=codebuddy pane=3\n{{\"hook_event_name\":\"{name}\"}}");
         assert!(parse_remote_envelope(raw.as_bytes(), Some(3)).is_none(), "{name} must be dropped");
@@ -622,6 +622,8 @@ fn codebuddy_subagent_events_cannot_drive_the_primary_turn() {
     }
     // 上游任一注入点都可能单独出现，只带一个字段同样拒收。
     let raw = b"nebula-hook/1 source=codebuddy pane=3\n{\"hook_event_name\":\"Stop\",\"session_id\":\"main\",\"agent_type\":\"worker\"}";
+    assert!(parse_remote_envelope(raw, Some(3)).is_none());
+    let raw = b"nebula-hook/1 source=codebuddy pane=3\n{\"hook_event_name\":\"Stop\",\"session_id\":\"main\",\"agent_id\":\"child\"}";
     assert!(parse_remote_envelope(raw, Some(3)).is_none());
 }
 

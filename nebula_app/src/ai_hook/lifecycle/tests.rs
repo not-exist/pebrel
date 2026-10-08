@@ -285,6 +285,28 @@ fn untyped_legacy_notifications_cannot_reopen_an_idle_or_finished_turn() {
     assert_eq!(activity.status(), AgentStatus::Blocked);
 }
 
+/// codebuddy 的无类型 Notification 与 claude 同受 legacy_attention 门约束：
+/// 未标注类型的旧式通知只允许在回合进行中点亮等待，不能把 Idle/Done 的 pane
+/// 顶成清不掉的 Blocked（与 claude 侧的钉子逐行镜像）。
+#[test]
+fn codebuddy_untyped_legacy_notifications_cannot_reopen_an_idle_or_finished_turn() {
+    let wire = b"nebula-hook/1 source=codebuddy\n{\"hook_event_name\":\"Notification\",\"session_id\":\"s\",\"message\":\"waiting for input\"}";
+    let notification = parse_remote_envelope(wire, Some(1)).unwrap();
+    let mut activity = AgentActivity::default();
+    activity.apply_hook(&event("codebuddy", "s", "SessionStart"));
+    assert!(!activity.apply_hook(&notification));
+    assert_eq!(activity.status(), AgentStatus::Idle);
+    activity.apply_hook(&event("codebuddy", "s", "UserPromptSubmit"));
+    assert!(activity.apply_hook(&notification));
+    assert_eq!(activity.status(), AgentStatus::Blocked);
+    activity.apply_hook(&event("codebuddy", "s", "Stop"));
+    assert!(!activity.apply_hook(&notification));
+    assert_eq!(activity.status(), AgentStatus::Done);
+    // An explicit permission request is actionable even without a prior turn.
+    assert!(activity.apply_hook(&event("codebuddy", "s", "PermissionRequest")));
+    assert_eq!(activity.status(), AgentStatus::Blocked);
+}
+
 #[test]
 fn shell_command_end_rejects_late_hooks_until_a_new_command_starts() {
     let mut activity = AgentActivity::default();

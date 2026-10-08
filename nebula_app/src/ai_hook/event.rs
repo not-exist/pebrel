@@ -96,7 +96,8 @@ pub fn capabilities_for(source: &str) -> AiHookCapabilities {
             serialized_delivery: false,
         },
         // codebuddy 与 kimi 同档：生命周期与 attention 上下文全有，但载荷里
-        // 没有后台任务集合，也没有任何顺序字段（nebula_hook 纯转发）。
+        // 没有后台任务集合，也没有任何顺序字段（nebula_hook 纯转发）；本档
+        // 除这二者外还含既有成员 copilot/grok。
         "codebuddy" | "kimi" | "copilot" | "grok" => AiHookCapabilities {
             lifecycle: true,
             attention_events: true,
