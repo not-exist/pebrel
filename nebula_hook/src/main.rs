@@ -26,6 +26,7 @@
 //! ```text
 //! nebula-hook claude                              # payload on stdin
 //! nebula-hook kimi                                # payload on stdin
+//! nebula-hook codebuddy                           # payload on stdin
 //! nebula-hook codex <json>                        # payload as last arg
 //! nebula-hook codex --hooks=full                  # native hooks, stdin
 //! nebula-hook codex --chain <exe> <fixed…> <json> # + exec previous notifier
@@ -212,16 +213,30 @@ fn read_payload(mut reader: impl Read) -> std::io::Result<Option<Vec<u8>>> {
 fn known_source(source: &str) -> bool {
     matches!(
         source,
-        "claude" | "codex" | "opencode" | "pi" | "kimi" | "omp" | "copilot" | "grok" | "cursor"
+        "claude"
+            | "codex"
+            | "opencode"
+            | "pi"
+            | "kimi"
+            | "omp"
+            | "copilot"
+            | "grok"
+            | "cursor"
+            | "codebuddy"
     )
 }
 
 /// 载荷通道。claude 与 kimi 都把事件 JSON 写到我们的 stdin（kimi 的 `[[hooks]]`
-/// command 与 claude 的 hook 同形态，事件经 stdin 传入）；走 stdin 的 source 必须
-/// 无论如何都抽干管道（约束 1：未读的管道会在 CLI 侧变成 hook write error）。
-/// 其余 CLI 把载荷追加为末位参数。
+/// command 与 claude 的 hook 同形态，事件经 stdin 传入）；codebuddy 的 hook 装
+/// 在它自己的 `~/.codebuddy/settings.json` 里，调用形态与 claude 完全一致，也
+/// 经 stdin 传入——漏加会导致载荷被当作 argv 末位参数静默错路。走 stdin 的
+/// source 必须无论如何都抽干管道（约束 1：未读的管道会在 CLI 侧变成 hook
+/// write error）。其余 CLI 把载荷追加为末位参数。
+///
+/// codebuddy 只读自己的配置文件，不借读 `~/.claude/settings.json`，所以它不出
+/// 现在串台门的检查清单里，也不需要 `FOREIGN_HOOK_RUNNERS` 判据。
 fn payload_on_stdin(source: &str) -> bool {
-    matches!(source, "claude" | "kimi" | "copilot" | "grok" | "cursor")
+    matches!(source, "claude" | "kimi" | "copilot" | "grok" | "cursor" | "codebuddy")
 }
 
 fn native_event(args: &[String]) -> Option<&str> {
@@ -423,12 +438,13 @@ mod tests {
     /// 靠这个字段把载荷路由给 kimi 的解析分支，签错名字会被静默丢弃。
     #[test]
     fn kimi_reads_stdin_and_signs_its_own_envelope() {
-        for source in ["claude", "codex", "opencode", "pi", "kimi"] {
+        for source in ["claude", "codex", "opencode", "pi", "kimi", "codebuddy"] {
             assert!(super::known_source(source), "{source} 必须仍在白名单里");
         }
         assert!(!super::known_source("kimi-code"), "白名单只认精确的 source 名");
         assert!(super::payload_on_stdin("claude"));
         assert!(super::payload_on_stdin("kimi"));
+        assert!(super::payload_on_stdin("codebuddy"));
         for source in ["codex", "opencode", "pi"] {
             assert!(!super::payload_on_stdin(source), "{source} 的载荷在末位参数");
         }

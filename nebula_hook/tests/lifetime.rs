@@ -47,7 +47,7 @@ impl Drop for Invocation {
 
 #[test]
 fn stdin_kept_open_cannot_pin_a_native_hook_executable() {
-    for args in [&["codex", "--hooks=full"][..], &["claude"][..]] {
+    for args in [&["codex", "--hooks=full"][..], &["claude"][..], &["codebuddy"][..]] {
         let mut invocation = Invocation::spawn(args, None);
         let mut input = invocation.0.as_mut().unwrap().stdin.take().unwrap();
         input.write_all(b"{\"hook_event_name\":\"Stop\"}").unwrap();
@@ -109,6 +109,54 @@ fn unix_socket_delivers_the_envelope_and_waits_for_acknowledgement() {
     let mut message = String::new();
     stream.read_to_string(&mut message).unwrap();
     assert!(message.starts_with("nebula-hook/1 source=claude pane="));
+    assert!(message.ends_with("\n{\"hook_event_name\":\"Stop\"}"));
+    assert!(invocation.0.as_mut().unwrap().try_wait().unwrap().is_none());
+    stream.write_all(b"\n").unwrap();
+    assert!(invocation.finish().stdout.is_empty());
+    drop(listener);
+    std::fs::remove_file(path).unwrap();
+}
+
+/// codebuddy is stdin-shaped like claude. Both wirings are load-bearing here:
+/// a missing `known_source` entry makes the helper a silent no-op (the socket
+/// never sees a connection), and a missing `payload_on_stdin` entry pushes the
+/// payload through the argv-tail path, so the envelope would carry the literal
+/// argument "codebuddy" instead of the streamed JSON.
+#[cfg(unix)]
+#[test]
+fn codebuddy_stdin_payload_reaches_the_socket_ack_path() {
+    use std::io::Read as _;
+    use std::os::unix::net::UnixListener;
+    let path = std::env::temp_dir()
+        .join(format!("pebrel-hook-test-codebuddy-{}.sock", std::process::id()));
+    let listener = UnixListener::bind(&path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut invocation = Invocation::spawn(&["codebuddy"], Some(path.to_str().unwrap()));
+    invocation
+        .0
+        .as_mut()
+        .unwrap()
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"{\"hook_event_name\":\"Stop\"}")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut stream = loop {
+        match listener.accept() {
+            Ok((stream, _)) => break stream,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            },
+            Err(error) => panic!("helper did not connect: {error}"),
+        }
+    };
+    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let mut message = String::new();
+    stream.read_to_string(&mut message).unwrap();
+    assert!(message.starts_with("nebula-hook/1 source=codebuddy pane="));
     assert!(message.ends_with("\n{\"hook_event_name\":\"Stop\"}"));
     assert!(invocation.0.as_mut().unwrap().try_wait().unwrap().is_none());
     stream.write_all(b"\n").unwrap();
