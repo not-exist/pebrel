@@ -189,10 +189,12 @@ fn ensure_codebuddy_hooks_in_dir(dir: &Path, helper: &str) -> bool {
 /// 自愈/安装入口。返回是否写了文件。
 pub(super) fn ensure_codebuddy_hooks() -> bool {
     let Some(dir) = codebuddy_config_dir() else { return false };
-    let Some(helper) = super::helper_path() else { return false };
-    // 与 claude/kimi 条目一致：Windows 路径统一成正斜杠。
-    let helper = helper.to_string_lossy().into_owned();
-    let helper = if cfg!(windows) { helper.replace('\\', "/") } else { helper };
+    // 复用 claude 条目的 helper_command()：同一份「lossy 字符串 +
+    // Windows 反斜杠统一成正斜杠」归一化。codebuddy 侧拿到的不是最终
+    // 命令（install_into 还要经 remote::quote 引用成 shell 字符串，
+    // Windows 上由 Git Bash 经 $SHELL -c 消费，同样要求正斜杠），但
+    // 需要的中间值完全一致。
+    let Some(helper) = super::helper_command() else { return false };
     let changed = ensure_codebuddy_hooks_in_dir(&dir, &helper);
     if changed {
         super::announce();

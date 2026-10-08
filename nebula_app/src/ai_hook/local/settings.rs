@@ -362,6 +362,9 @@ mod tests {
         assert!(!current_at(AgentHook::CodeBuddy, &path, helper).unwrap());
 
         // 完整条目（全部订阅事件都在）：已安装且最新。
+        // 事件清单刻意硬编码为独立字面量、不跟随 CODEBUDDY_EVENTS：
+        // 清单增删事件而未同步此处时，current_at 变假，下方断言响亮
+        // 失败——刻意的 tripwire。
         let events = [
             "SessionStart",
             "UserPromptSubmit",
