@@ -83,6 +83,7 @@ def locations():
     root = Path(os.environ.get("XDG_DATA_HOME", home / ".local/share")) / "pebrel/ai"
     paths = {
         "claude": Path(os.environ.get("CLAUDE_CONFIG_DIR", home / ".claude")) / "settings.json",
+        "codebuddy": Path(os.environ.get("CODEBUDDY_CONFIG_DIR", home / ".codebuddy")) / "settings.json",
         "codex": Path(os.environ.get("CODEX_HOME", home / ".codex")) / "hooks.json",
         "codex_config": Path(os.environ.get("CODEX_HOME", home / ".codex")) / "config.toml",
         "opencode": Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")) / "opencode/plugins/pebrel.js",
@@ -112,6 +113,7 @@ def snapshot():
         "shell": os.environ.get("SHELL", "/bin/sh"), "files": files,
         "providers": {
             "claude": paths["claude"].parent.is_dir(),
+            "codebuddy": paths["codebuddy"].parent.is_dir(),
             "codex": paths["codex"].parent.is_dir(),
             "opencode": paths["opencode"].parent.parent.is_dir(),
             "pi": paths["pi"].parent.parent.is_dir(),

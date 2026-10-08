@@ -17,28 +17,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use crate::ai_hook::CODEBUDDY_EVENTS;
 use crate::ai_hook::is_helper_shell_command;
 
 /// hook 条目的 timeout（秒）。与 claude/kimi hook 的取值保持一致；
 /// 条目一旦写入，用户手调过的值不会被自愈覆盖。
 const CODEBUDDY_HOOK_TIMEOUT: i64 = 10;
-
-/// 订阅的 CodeBuddy 事件，与 claude 对齐。其中 PermissionRequest、
-/// PostToolUseFailure、StopFailure 在 CodeBuddy 尚属未文档化事件，但其
-/// 内部 enum 已有对应派发点；上游若改名，这三个事件只会静默退化（收不到
-/// 转发），不影响其余事件的接线——该取舍已确认接受。
-const CODEBUDDY_EVENTS: [&str; 10] = [
-    "SessionStart",
-    "UserPromptSubmit",
-    "Notification",
-    "PermissionRequest",
-    "PreToolUse",
-    "PostToolUse",
-    "PostToolUseFailure",
-    "Stop",
-    "StopFailure",
-    "SessionEnd",
-];
 
 /// CodeBuddy 的配置目录：`$CODEBUDDY_CONFIG_DIR`，否则 `~/.codebuddy`。
 /// 已对照 2.150.0 安装 bundle 核实：主导解析模式为 trim 判空、非空原值

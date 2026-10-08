@@ -72,6 +72,39 @@ class RemoteHooksTests(unittest.TestCase):
             files.apply(plan)
         self.assertEqual(paths["claude"].read_text(), "user change")
 
+    def test_codebuddy_provider_detection_follows_the_config_dir_footprint(self):
+        files = module("remote_files")
+        snapshot = files.snapshot()
+        self.assertIs(snapshot["providers"]["codebuddy"], False)
+        self.assertIsNone(snapshot["files"]["codebuddy"]["sha256"])
+        self.assertEqual(snapshot["files"]["codebuddy"]["path"],
+                         str(self.root / ".codebuddy/settings.json"))
+        # A bare directory footprint is enough, mirroring claude: the planner
+        # never scaffolds the tree, an existing user reports the provider.
+        (self.root / ".codebuddy").mkdir()
+        snapshot = files.snapshot()
+        self.assertIs(snapshot["providers"]["codebuddy"], True)
+        # CODEBUDDY_CONFIG_DIR relocates the settings file like the local
+        # adapter does.
+        configured = self.root / "configured"
+        configured.mkdir()
+        with patch.dict(os.environ, {"CODEBUDDY_CONFIG_DIR": str(configured)}):
+            snapshot = files.snapshot()
+        self.assertEqual(snapshot["files"]["codebuddy"]["path"], str(configured / "settings.json"))
+        self.assertIs(snapshot["providers"]["codebuddy"], True)
+
+    def test_codebuddy_settings_are_transacted_like_other_provider_files(self):
+        files = module("remote_files")
+        snapshot = files.snapshot()
+        root, paths = files.locations()
+        paths["codebuddy"].parent.mkdir(parents=True)
+        paths["codebuddy"].write_text("user change")
+        plan = [{"name": "codebuddy", "expected": snapshot["files"]["codebuddy"]["sha256"],
+                 "content": "new"}]
+        with self.assertRaisesRegex(ValueError, "changed during setup"):
+            files.apply(plan)
+        self.assertEqual(paths["codebuddy"].read_text(), "user change")
+
     def test_transaction_rolls_back_only_its_writes(self):
         files = module("remote_files")
         real_replace = files.replace

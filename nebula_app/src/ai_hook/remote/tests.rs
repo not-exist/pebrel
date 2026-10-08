@@ -4,6 +4,7 @@ fn snapshot() -> Snapshot {
     let mut files = BTreeMap::new();
     for name in [
         "claude",
+        "codebuddy",
         "codex",
         "codex_config",
         "opencode",
@@ -248,4 +249,59 @@ fn wsl_retains_codebuddy_as_a_file_style_provider() {
     for name in ["opencode", "pi"] {
         assert!(!wsl.present(name), "{name} is a plugin adapter needing the SSH bootstrap env");
     }
+    let edits = wsl.plan(Action::Install).unwrap().unwrap();
+    let installed = edits
+        .iter()
+        .find(|edit| edit.name == "codebuddy")
+        .expect("guest codebuddy hooks are planned without the SSH bootstrap env");
+    assert!(installed.content.as_deref().unwrap_or_default().contains("codebuddy"));
+}
+
+/// CodeBuddy merges the same command-group shape as claude into its
+/// settings.json, keeps foreign entries byte-identical across the whole
+/// install/upgrade/remove cycle, and follows the remote helper budget
+/// (timeout 3), not the local adapter's 10.
+#[test]
+fn codebuddy_install_repeat_upgrade_remove_restores_foreign_configuration() {
+    let mut snapshot = snapshot();
+    snapshot.providers.insert("codebuddy".into(), true);
+    put(
+        &mut snapshot,
+        "codebuddy",
+        r#"{"model":"kept","hooks":{"Stop":[{"hooks":[{"type":"command","command":"user-hook"}]}]}}"#,
+    );
+    let edits = snapshot.plan(Action::Install).unwrap().unwrap();
+    apply(&mut snapshot, edits);
+    let settings: Value =
+        serde_json::from_str(snapshot.raw("codebuddy").unwrap().unwrap()).unwrap();
+    assert_eq!(settings["model"], "kept");
+    let stop = settings["hooks"]["Stop"].as_array().unwrap();
+    assert_eq!(stop.len(), 2);
+    assert_eq!(stop[0]["hooks"][0]["command"], json!("user-hook"));
+    assert_eq!(
+        stop[1]["hooks"][0]["command"],
+        json!("'/home/a b/'\\''user/pebrel-hook' codebuddy")
+    );
+    assert_eq!(stop[1]["hooks"][0]["timeout"], json!(3));
+    assert!(snapshot.plan(Action::Automatic).unwrap().unwrap().is_empty());
+    // A moved helper heals our entries in place: no duplicate matchers, the
+    // foreign command and the user's timeout fields survive.
+    snapshot.files.get_mut("pebrel-hook").unwrap().path = "/new/helper/pebrel-hook".into();
+    let edits = snapshot.plan(Action::Install).unwrap().unwrap();
+    apply(&mut snapshot, edits);
+    let settings: Value =
+        serde_json::from_str(snapshot.raw("codebuddy").unwrap().unwrap()).unwrap();
+    let stop = settings["hooks"]["Stop"].as_array().unwrap();
+    assert_eq!(stop.len(), 2);
+    assert_eq!(stop[0]["hooks"][0]["command"], json!("user-hook"));
+    assert_eq!(stop[1]["hooks"][0]["command"], json!("'/new/helper/pebrel-hook' codebuddy"));
+    assert!(snapshot.plan(Action::Automatic).unwrap().unwrap().is_empty());
+    let edits = snapshot.plan(Action::Remove).unwrap().unwrap();
+    apply(&mut snapshot, edits);
+    let settings: Value =
+        serde_json::from_str(snapshot.raw("codebuddy").unwrap().unwrap()).unwrap();
+    assert_eq!(settings["model"], "kept");
+    assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
+    assert_eq!(settings["hooks"]["Stop"][0]["hooks"][0]["command"], json!("user-hook"));
+    assert!(snapshot.plan(Action::Automatic).unwrap().is_none());
 }

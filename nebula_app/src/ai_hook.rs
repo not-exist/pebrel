@@ -115,6 +115,25 @@ const CLAUDE_EVENTS: [&str; 10] = [
     "SessionEnd",
 ];
 
+/// 订阅的 CodeBuddy 事件，与 claude 对齐（本地与远端安装共用这份清单）。
+/// 其中 PermissionRequest、PostToolUseFailure、StopFailure 在 CodeBuddy
+/// 尚属未文档化事件，但其内部 enum 已有对应派发点；上游若改名，这三个
+/// 事件只会静默退化（收不到转发），不影响其余事件的接线——该取舍已确认
+/// 接受。清单刻意独立于 CLAUDE_EVENTS 拷贝：任何一侧的增改都必须对照
+/// 对应 CLI 的事件契约重新核实，不得隐式跟随。
+const CODEBUDDY_EVENTS: [&str; 10] = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "Notification",
+    "PermissionRequest",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "Stop",
+    "StopFailure",
+    "SessionEnd",
+];
+
 pub use local::{setup_ai_cli, spawn_config_guard};
 #[cfg(windows)]
 pub use windows::spawn_gpui_server;

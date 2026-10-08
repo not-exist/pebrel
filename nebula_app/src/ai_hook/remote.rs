@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::{CLAUDE_EVENTS, bridges, installation};
+use super::{CLAUDE_EVENTS, CODEBUDDY_EVENTS, bridges, installation};
 
 pub(crate) const FILE_ADAPTER: &str = include_str!("../../res/hooks/remote_files.py");
 const BRIDGE: &str = include_str!("../../res/hooks/remote_bridge.py");
@@ -211,6 +211,16 @@ impl Snapshot {
                 (event.to_owned(), json!([{"matcher":"", "hooks":[{"type":"command", "command":command, "timeout":3}]}]))
             }).collect::<serde_json::Map<_, _>>();
             self.merge_provider(manifest, edits, "claude", Value::Object(groups))?;
+        }
+        // CodeBuddy is file-style like claude: command hooks in settings.json,
+        // no plugin asset. The remote helper budget keeps every hook timeout
+        // at 3, matching claude — not the local adapter's 10.
+        if self.present("codebuddy") {
+            let command = format!("{} codebuddy", quote(helper));
+            let groups = CODEBUDDY_EVENTS.into_iter().map(|event| {
+                (event.to_owned(), json!([{"matcher":"", "hooks":[{"type":"command", "command":command, "timeout":3}]}]))
+            }).collect::<serde_json::Map<_, _>>();
+            self.merge_provider(manifest, edits, "codebuddy", Value::Object(groups))?;
         }
         if self.present("codex") {
             self.install_codex(manifest, edits, helper)?;
