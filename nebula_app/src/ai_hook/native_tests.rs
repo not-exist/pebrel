@@ -409,11 +409,19 @@ fn codebuddy_hooks_drive_the_full_lifecycle() {
     );
     assert_eq!(activity.status(), AgentStatus::Working);
 
-    // AskUserQuestion 同样把 pane 拉回 Blocked，工具答复后恢复 Working。
-    let question = parse(json!({"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion"}));
+    // 提问由 Notification(permission_prompt) 把 pane 拉回 Blocked；用户答完后
+    // 才到的 PreToolUse(AskUserQuestion) 只是工具边界，pane 恢复 Working。
+    let question = parse(json!({"hook_event_name":"Notification","session_id":"cb-1",
+        "notification_type":"permission_prompt","message":"needs your permission to use AskUserQuestion"}));
     assert_eq!(question.kind, AiHookKind::NeedsAttention);
     assert!(activity.apply_hook(&question));
     assert_eq!(activity.status(), AgentStatus::Blocked);
+    let answered = parse(
+        json!({"hook_event_name":"PreToolUse","session_id":"cb-1","tool_name":"AskUserQuestion"}),
+    );
+    assert_eq!(answered.kind, AiHookKind::ToolComplete);
+    assert!(activity.apply_hook(&answered));
+    assert_eq!(activity.status(), AgentStatus::Working);
     assert!(
         activity.apply_hook(&parse(json!({"hook_event_name":"PostToolUse","session_id":"cb-1"})))
     );

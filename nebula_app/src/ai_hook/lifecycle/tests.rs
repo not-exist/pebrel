@@ -333,6 +333,37 @@ fn codebuddy_main_session_turn_reaches_done() {
     }
 }
 
+/// CodeBuddy 2.163.0 的真实提问回合：问题弹出时只有一条
+/// Notification(permission_prompt)，PreToolUse(AskUserQuestion) 在用户答完后
+/// 才到。整条序列只能有一次等待信号，答完后不能再把 pane 拉回 Blocked。
+#[test]
+fn codebuddy_question_turn_asks_for_attention_once() {
+    const FIXTURE: &str = include_str!(
+        "../../../../scripts/tests/fixtures/codebuddy-2.163.0/ask-user-question.jsonl"
+    );
+    let expected = [
+        ("SessionStart", AgentStatus::Idle),
+        ("UserPromptSubmit", AgentStatus::Working),
+        ("Notification", AgentStatus::Blocked),
+        ("PreToolUse", AgentStatus::Working),
+        ("PostToolUse", AgentStatus::Working),
+        ("Stop", AgentStatus::Done),
+    ];
+    let lines = FIXTURE.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), expected.len());
+    let mut activity = AgentActivity::default();
+    let mut attention = 0;
+    for (line, (name, status)) in lines.into_iter().zip(expected) {
+        let wire = format!("nebula-hook/1 source=codebuddy\n{line}");
+        let event = parse_remote_envelope(wire.as_bytes(), Some(1))
+            .unwrap_or_else(|| panic!("{name} was dropped"));
+        attention += usize::from(event.kind == AiHookKind::NeedsAttention);
+        activity.apply_hook(&event);
+        assert_eq!(activity.status(), status, "{name}");
+    }
+    assert_eq!(attention, 1);
+}
+
 #[test]
 fn shell_command_end_rejects_late_hooks_until_a_new_command_starts() {
     let mut activity = AgentActivity::default();

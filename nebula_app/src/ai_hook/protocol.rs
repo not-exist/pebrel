@@ -135,8 +135,17 @@ pub(super) fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
         "claude" | "codebuddy" => match payload.get("hook_event_name").and_then(Value::as_str) {
             Some("SessionStart") => (AiHookKind::SessionStart, None),
             Some("UserPromptSubmit") => (AiHookKind::PromptSubmit, None),
+            // 提问工具只在 claude 上是等待信号：claude 在弹出问题前发
+            // PreToolUse。codebuddy 2.163.0 弹出问题时发
+            // Notification(permission_prompt)（bypassPermissions 下也发），
+            // PreToolUse(AskUserQuestion) 要等用户答完才到，紧跟 PostToolUse；
+            // 若再按等待处理，会在用户刚答完时重复弹一次「需要处理」通知。
+            // 它在 codebuddy 上只是普通工具边界，落到下面的 ToolComplete。
+            // 实测载荷见 scripts/tests/fixtures/codebuddy-2.163.0/ask-user-question.jsonl。
             Some("PreToolUse")
-                if payload.get("tool_name").and_then(Value::as_str) == Some("AskUserQuestion") =>
+                if source == "claude"
+                    && payload.get("tool_name").and_then(Value::as_str)
+                        == Some("AskUserQuestion") =>
             {
                 (AiHookKind::NeedsAttention, attention_message(&payload))
             },

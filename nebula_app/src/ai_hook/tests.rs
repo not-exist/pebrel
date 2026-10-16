@@ -551,11 +551,18 @@ fn codebuddy_events_map_to_the_shared_lifecycle() {
         assert_eq!(event.kind, expected, "{name}");
     }
 
-    // PreToolUse 的特判只认提问工具；普通工具是工具边界，不点亮等待徽标。
+    // PreToolUse 一律是工具边界，不点亮等待徽标。提问工具也不例外：
+    // codebuddy 的 PreToolUse(AskUserQuestion) 在用户答完后才到，等待信号
+    // 是先到的 Notification(permission_prompt)。claude 不受影响。
     let plain_tool = b"nebula-hook/1 source=codebuddy pane=3\n{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\"}";
     assert_eq!(parse_remote_envelope(plain_tool, Some(3)).unwrap().kind, AiHookKind::ToolComplete);
     let question = b"nebula-hook/1 source=codebuddy pane=3\n{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"AskUserQuestion\"}";
-    assert_eq!(parse_remote_envelope(question, Some(3)).unwrap().kind, AiHookKind::NeedsAttention);
+    assert_eq!(parse_remote_envelope(question, Some(3)).unwrap().kind, AiHookKind::ToolComplete);
+    let claude_question = b"nebula-hook/1 source=claude pane=3\n{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"AskUserQuestion\"}";
+    assert_eq!(
+        parse_remote_envelope(claude_question, Some(3)).unwrap().kind,
+        AiHookKind::NeedsAttention
+    );
 
     // PermissionRequest 表示「现在需要用户」。
     let raw = b"nebula-hook/1 source=codebuddy pane=9\n{\"hook_event_name\":\"PermissionRequest\",\"tool_name\":\"Bash\",\"cwd\":\"/work/cb\"}";
