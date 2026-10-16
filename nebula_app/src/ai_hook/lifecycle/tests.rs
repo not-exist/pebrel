@@ -307,6 +307,32 @@ fn codebuddy_untyped_legacy_notifications_cannot_reopen_an_idle_or_finished_turn
     assert_eq!(activity.status(), AgentStatus::Blocked);
 }
 
+/// CodeBuddy 2.163.0 主会话的真实回合：工具、权限与收尾事件都带
+/// `"agent_type":"cli"`。整条序列必须走完 Working → Blocked → Working → Done，
+/// 不能停在 Working（子代理门曾把这些事件全部误拦）。
+#[test]
+fn codebuddy_main_session_turn_reaches_done() {
+    const FIXTURE: &str =
+        include_str!("../../../../scripts/tests/fixtures/codebuddy-2.163.0/main-session.jsonl");
+    let expected = [
+        ("SessionStart", AgentStatus::Idle),
+        ("UserPromptSubmit", AgentStatus::Working),
+        ("PreToolUse", AgentStatus::Working),
+        ("PermissionRequest", AgentStatus::Blocked),
+        ("Notification", AgentStatus::Blocked),
+        ("PostToolUse", AgentStatus::Working),
+        ("Stop", AgentStatus::Done),
+    ];
+    let mut activity = AgentActivity::default();
+    for (line, (name, status)) in FIXTURE.lines().zip(expected) {
+        let wire = format!("nebula-hook/1 source=codebuddy\n{line}");
+        let event = parse_remote_envelope(wire.as_bytes(), Some(1))
+            .unwrap_or_else(|| panic!("{name} was dropped"));
+        activity.apply_hook(&event);
+        assert_eq!(activity.status(), status, "{name}");
+    }
+}
+
 #[test]
 fn shell_command_end_rejects_late_hooks_until_a_new_command_starts() {
     let mut activity = AgentActivity::default();

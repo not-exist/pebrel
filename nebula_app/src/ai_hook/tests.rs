@@ -610,8 +610,8 @@ fn codebuddy_rejects_camel_case_runner_payloads() {
 }
 
 /// 子代理事件共享父 session 身份，却不能终结或替换主回合：codebuddy 用
-/// agent_id/agent_type 标注子代理上下文，带任一字段的事件整包拒收
-/// （与 codex 的处理一致）。
+/// 非空 `agent_id` 标注子代理上下文，带它的事件整包拒收（与 codex 的处理
+/// 一致）。`agent_type` 单独出现不算子代理——主会话也带 `"agent_type":"cli"`。
 #[test]
 fn codebuddy_subagent_events_cannot_drive_the_primary_turn() {
     for name in ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "Notification"] {
@@ -620,11 +620,53 @@ fn codebuddy_subagent_events_cannot_drive_the_primary_turn() {
         );
         assert!(parse_remote_envelope(raw.as_bytes(), Some(3)).is_none(), "{name}");
     }
-    // 上游任一注入点都可能单独出现，只带一个字段同样拒收。
-    let raw = b"nebula-hook/1 source=codebuddy pane=3\n{\"hook_event_name\":\"Stop\",\"session_id\":\"main\",\"agent_type\":\"worker\"}";
-    assert!(parse_remote_envelope(raw, Some(3)).is_none());
+    // 只带 agent_id 同样拒收。
     let raw = b"nebula-hook/1 source=codebuddy pane=3\n{\"hook_event_name\":\"Stop\",\"session_id\":\"main\",\"agent_id\":\"child\"}";
     assert!(parse_remote_envelope(raw, Some(3)).is_none());
+    // 空串视为未标注。
+    let raw = b"nebula-hook/1 source=codebuddy pane=3\n{\"hook_event_name\":\"Stop\",\"session_id\":\"main\",\"agent_id\":\"\"}";
+    assert_eq!(parse_remote_envelope(raw, Some(3)).unwrap().kind, AiHookKind::TurnDone);
+    // 只带 agent_type、不带 agent_id 的是主会话，必须照常收尾。
+    for agent_type in ["cli", "worker"] {
+        let raw = format!(
+            "nebula-hook/1 source=codebuddy pane=3\n{{\"hook_event_name\":\"Stop\",\"session_id\":\"main\",\"agent_type\":\"{agent_type}\"}}"
+        );
+        let event = parse_remote_envelope(raw.as_bytes(), Some(3)).unwrap();
+        assert_eq!(event.kind, AiHookKind::TurnDone, "{agent_type}");
+    }
+}
+
+/// CodeBuddy 2.163.0 主会话的真实载荷（路径已脱敏，Stop 取自同版本另一次
+/// 运行并对齐 session_id）。工具、权限与收尾事件都带 `"agent_type":"cli"`，
+/// 一条都不能被子代理门误拦，否则 pane 停在 Working、权限请求不亮 Blocked。
+#[test]
+fn codebuddy_main_session_payloads_drive_the_turn() {
+    const FIXTURE: &str =
+        include_str!("../../../scripts/tests/fixtures/codebuddy-2.163.0/main-session.jsonl");
+    let expected = [
+        ("SessionStart", AiHookKind::SessionStart),
+        ("UserPromptSubmit", AiHookKind::PromptSubmit),
+        ("PreToolUse", AiHookKind::ToolComplete),
+        ("PermissionRequest", AiHookKind::NeedsAttention),
+        ("Notification", AiHookKind::NeedsAttention),
+        ("PostToolUse", AiHookKind::ToolComplete),
+        ("Stop", AiHookKind::TurnDone),
+    ];
+    let lines = FIXTURE.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), expected.len());
+    for (line, (name, kind)) in lines.into_iter().zip(expected) {
+        let payload: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(payload["hook_event_name"], name);
+        let raw = format!("nebula-hook/1 source=codebuddy pane=3\n{line}");
+        let event = parse_remote_envelope(raw.as_bytes(), Some(3))
+            .unwrap_or_else(|| panic!("{name} from the main session was dropped"));
+        assert_eq!(event.kind, kind, "{name}");
+        assert_eq!(
+            event.session_id.as_deref(),
+            Some("01a12073-d649-7d98-bbb8-23bd6947df59"),
+            "{name}"
+        );
+    }
 }
 
 /// Stop 是成功收尾；StopFailure 是失败收尾并携带错误文本，供失败通知使用。

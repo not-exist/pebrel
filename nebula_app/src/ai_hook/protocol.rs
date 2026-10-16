@@ -57,13 +57,15 @@ pub(super) fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
         return None;
     }
     if source == "codebuddy"
-        && ["agent_id", "agent_type"]
-            .iter()
-            .any(|key| payload.get(*key).and_then(Value::as_str).is_some_and(|id| !id.is_empty()))
+        && payload.get("agent_id").and_then(Value::as_str).is_some_and(|id| !id.is_empty())
     {
         // CodeBuddy 的子代理事件共享父 session_id，却不能终结或替换主回合，
-        // 即使它们跑在同一个 OS 进程里（与 codex 的处理一致）：带非空
-        // agent_id/agent_type 标注的子代理上下文在此整包拦下，空串视为未标注。
+        // 即使它们跑在同一个 OS 进程里（与 codex 的处理一致）：只有非空
+        // `agent_id` 才标注子代理上下文，空串视为未标注。`agent_type` 不是
+        // 子代理标记——CodeBuddy 2.163.0 的主会话 PreToolUse/PostToolUse/
+        // PermissionRequest/Notification/Stop 都带 `"agent_type":"cli"`，按它
+        // 拦截会让主回合永远收不到 Stop 与权限请求（实测载荷见
+        // scripts/tests/fixtures/codebuddy-2.163.0/main-session.jsonl）。
         return None;
     }
     // 会话身份的候选字段名按 source 收紧。claude 每个 hook 载荷都带
