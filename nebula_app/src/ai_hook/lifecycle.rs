@@ -238,6 +238,16 @@ impl AgentActivity {
         if !self.accepts_hook(event) {
             return false;
         }
+        // codebuddy 的 `-p` 模式并发启动 SessionStart 与 UserPromptSubmit 两个
+        // hook 进程，载荷没有序号也没有时间戳，SessionStart 常常后到。同一
+        // session 的迟到 SessionStart 不能把进行中的回合打回 Idle；TUI 模式的
+        // SessionStart 只在启动时出现，此时还没有回合。
+        let late_start = event.kind == AiHookKind::SessionStart
+            && event.source == "codebuddy"
+            && self.turn_observed
+            && matches!(self.status, AgentStatus::Working | AgentStatus::Blocked)
+            && event.session_id.is_some()
+            && self.owner.as_ref().is_some_and(|owner| owner.session == event.session_id);
         self.record_owner(event);
         self.native_codex |= event.codex_hooks.is_some();
         if event.remote_process.is_some() && event.bridge_sequence.is_some() {
@@ -271,7 +281,7 @@ impl AgentActivity {
             self.pending_submit = false;
         }
         self.status = match event.kind {
-            AiHookKind::SessionStart if event.session_compacted => self.status,
+            AiHookKind::SessionStart if event.session_compacted || late_start => self.status,
             AiHookKind::SessionStart => {
                 self.turn_observed = false;
                 AgentStatus::Idle

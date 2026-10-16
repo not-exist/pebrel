@@ -364,6 +364,37 @@ fn codebuddy_question_turn_asks_for_attention_once() {
     assert_eq!(attention, 1);
 }
 
+/// CodeBuddy 2.163.0 `-p` 模式的真实回合：SessionStart 与 UserPromptSubmit
+/// 由并发的 hook 进程上报，SessionStart 后到。迟到的同 session SessionStart
+/// 不能把进行中的回合打回 Idle；回合结束后的 SessionStart 照常复位。
+#[test]
+fn codebuddy_late_session_start_keeps_the_running_turn() {
+    const FIXTURE: &str =
+        include_str!("../../../../scripts/tests/fixtures/codebuddy-2.163.0/print-mode.jsonl");
+    let expected = [
+        ("UserPromptSubmit", AgentStatus::Working),
+        ("SessionStart", AgentStatus::Working),
+        ("PreToolUse", AgentStatus::Working),
+        ("PostToolUse", AgentStatus::Working),
+        ("Stop", AgentStatus::Done),
+    ];
+    let lines = FIXTURE.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), expected.len());
+    let mut activity = AgentActivity::default();
+    let mut session = None;
+    for (line, (name, status)) in lines.into_iter().zip(expected) {
+        let wire = format!("nebula-hook/1 source=codebuddy\n{line}");
+        let event = parse_remote_envelope(wire.as_bytes(), Some(1))
+            .unwrap_or_else(|| panic!("{name} was dropped"));
+        session = event.session_id.clone();
+        activity.apply_hook(&event);
+        assert_eq!(activity.status(), status, "{name}");
+    }
+    let session = session.unwrap();
+    assert!(activity.apply_hook(&event("codebuddy", &session, "SessionStart")));
+    assert_eq!(activity.status(), AgentStatus::Idle);
+}
+
 #[test]
 fn shell_command_end_rejects_late_hooks_until_a_new_command_starts() {
     let mut activity = AgentActivity::default();
