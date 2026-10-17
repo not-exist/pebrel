@@ -536,7 +536,22 @@ fn codebuddy_events_map_to_the_shared_lifecycle() {
 {"hook_event_name":"Stop","session_id":"cb-session-1","stop_hook_active":false}"#;
     let event = parse_remote_envelope(raw, Some(3)).unwrap();
     assert_eq!(event.kind, AiHookKind::TurnDone);
+    assert_eq!(event.turn_outcome, AiTurnOutcome::Succeeded);
     assert_eq!(event.session_id.as_deref(), Some("cb-session-1"));
+
+    // Esc 中断仍发 Stop，只能靠固定的 last_assistant_message 认出取消；
+    // 其他回答原文照常算成功，claude 的同名文本也不受影响。
+    for (provider, message, expected) in [
+        ("codebuddy", "Interrupted by user", AiTurnOutcome::Cancelled),
+        ("codebuddy", "Interrupted by user, then resumed", AiTurnOutcome::Succeeded),
+        ("claude", "Interrupted by user", AiTurnOutcome::Succeeded),
+    ] {
+        let payload =
+            serde_json::json!({"hook_event_name":"Stop","last_assistant_message":message});
+        let raw = format!("nebula-hook/1 source={provider} pane=3\n{payload}");
+        let event = parse_remote_envelope(raw.as_bytes(), Some(3)).unwrap();
+        assert_eq!(event.turn_outcome, expected, "{provider}: {message}");
+    }
 
     for (name, expected) in [
         ("SessionStart", AiHookKind::SessionStart),

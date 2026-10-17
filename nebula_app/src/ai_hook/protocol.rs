@@ -11,6 +11,9 @@ use super::{
 
 const ID_MAX_CHARS: usize = 512;
 const TURN_RESULT_MAX_CHARS: usize = 4_000;
+/// codebuddy 中断回合时写进 Stop.last_assistant_message 的固定文本。
+/// 实测载荷见 scripts/tests/fixtures/codebuddy-2.163.0/esc-interrupt.jsonl。
+const CODEBUDDY_INTERRUPTED: &str = "Interrupted by user";
 static RECEIVE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Parse one pipe message: a `nebula-hook/1 source=<s> pane=<n>` header line,
@@ -244,6 +247,17 @@ pub(super) fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
         && kind == AiHookKind::TurnDone
     {
         match payload.get("hook_event_name").and_then(Value::as_str) {
+            // codebuddy 2.163.0 在用户按 Esc 中断生成或工具时仍发 Stop，没有
+            // 中断标记，只把 last_assistant_message 写成固定的未本地化常量
+            // "Interrupted by user"。按成功处理会弹出一条内容为
+            // 「Interrupted by user」的完成通知，并把 pane 标成 Done。
+            Some("Stop")
+                if source == "codebuddy"
+                    && payload.get("last_assistant_message").and_then(Value::as_str)
+                        == Some(CODEBUDDY_INTERRUPTED) =>
+            {
+                AiTurnOutcome::Cancelled
+            },
             Some("Stop") => AiTurnOutcome::Succeeded,
             Some("Interrupt") => AiTurnOutcome::Cancelled,
             Some("StopFailure") => AiTurnOutcome::Failed,

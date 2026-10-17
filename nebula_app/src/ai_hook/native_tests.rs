@@ -455,6 +455,22 @@ fn codebuddy_failure_does_not_announce_success() {
     assert_eq!(failed.message.as_deref(), Some("rate_limit"));
 }
 
+/// Esc 中断的回合不是完成：不弹完成通知，pane 回到 Idle 而不是 Done。
+#[test]
+fn codebuddy_interrupt_does_not_announce_completion() {
+    let interrupted = parse_remote_envelope(
+        br#"nebula-hook/1 source=codebuddy pane=3
+{"hook_event_name":"Stop","session_id":"cb-1","last_assistant_message":"Interrupted by user"}"#,
+        Some(3),
+    )
+    .unwrap();
+    assert_eq!(interrupted.turn_outcome, AiTurnOutcome::Cancelled);
+    assert!(
+        crate::notify::Notification::from_ai_hook(&interrupted, interrupted.message.clone(), false)
+            .is_none()
+    );
+}
+
 #[test]
 fn codebuddy_transcript_is_retained_without_changing_its_native_session_id() {
     let event = parse_remote_envelope(

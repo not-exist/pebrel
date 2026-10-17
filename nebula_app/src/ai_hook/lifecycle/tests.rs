@@ -395,6 +395,32 @@ fn codebuddy_late_session_start_keeps_the_running_turn() {
     assert_eq!(activity.status(), AgentStatus::Idle);
 }
 
+/// CodeBuddy 2.163.0 在工具运行中按 Esc 的真实回合：先到 PostToolUse，再到
+/// last_assistant_message 为 "Interrupted by user" 的 Stop。中断的回合回到
+/// Idle，不能标成 Done。
+#[test]
+fn codebuddy_interrupted_turn_returns_to_idle() {
+    const FIXTURE: &str =
+        include_str!("../../../../scripts/tests/fixtures/codebuddy-2.163.0/esc-interrupt.jsonl");
+    let expected = [
+        ("SessionStart", AgentStatus::Idle),
+        ("UserPromptSubmit", AgentStatus::Working),
+        ("PreToolUse", AgentStatus::Working),
+        ("PostToolUse", AgentStatus::Working),
+        ("Stop", AgentStatus::Idle),
+    ];
+    let lines = FIXTURE.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), expected.len());
+    let mut activity = AgentActivity::default();
+    for (line, (name, status)) in lines.into_iter().zip(expected) {
+        let wire = format!("nebula-hook/1 source=codebuddy\n{line}");
+        let event = parse_remote_envelope(wire.as_bytes(), Some(1))
+            .unwrap_or_else(|| panic!("{name} was dropped"));
+        activity.apply_hook(&event);
+        assert_eq!(activity.status(), status, "{name}");
+    }
+}
+
 #[test]
 fn shell_command_end_rejects_late_hooks_until_a_new_command_starts() {
     let mut activity = AgentActivity::default();
