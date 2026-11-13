@@ -306,8 +306,8 @@ mod tests {
         *panel.snapshot_slot.lock().unwrap() = Some(PanelSnapshot {
             root: root.clone(),
             files_wsl: Some(located.clone()),
-            rows: Vec::new(),
-            enumeration_ok: true,
+            update: SnapshotUpdate::Rows { rows: Vec::new(), enumeration_ok: true },
+            tree_generation: 0,
             git: None,
         });
         assert!(panel.harvest_snapshot());
@@ -316,8 +316,8 @@ mod tests {
         *panel.snapshot_slot.lock().unwrap() = Some(PanelSnapshot {
             root,
             files_wsl: Some(located),
-            rows: Vec::new(),
-            enumeration_ok: true,
+            update: SnapshotUpdate::Rows { rows: Vec::new(), enumeration_ok: true },
+            tree_generation: 0,
             git: Some(None),
         });
         assert!(panel.harvest_snapshot());
@@ -439,6 +439,154 @@ mod tests {
 
         p.file_index.release_for_test();
         remove_test_directory(&base);
+    }
+
+    #[test]
+    fn ignore_only_snapshot_annotates_current_rows_without_replacing_them() {
+        let root = PathBuf::from("/repo");
+        let mut panel = SidePanel::new();
+        panel.open = true;
+        panel.root = Some(root.clone());
+        panel.tree_rows = vec![test_row("a", 0, true), test_row("b", 0, false)];
+        panel.rows.clone_from(&panel.tree_rows);
+
+        *panel.snapshot_slot.lock().unwrap() = Some(PanelSnapshot {
+            root,
+            files_wsl: None,
+            update: SnapshotUpdate::Ignored(HashSet::from([PathBuf::from("a")])),
+            tree_generation: 0,
+            git: None,
+        });
+        assert!(panel.harvest_snapshot());
+        assert!(panel.file_rows()[0].ignored);
+        assert!(!panel.file_rows()[1].ignored);
+        assert_eq!(panel.file_rows().len(), 2, "the follow-up pass never replaces rows");
+    }
+
+    #[test]
+    fn stale_full_snapshot_does_not_revert_expanded_rows() {
+        let root = PathBuf::from("/repo");
+        let mut panel = SidePanel::new();
+        panel.open = true;
+        panel.root = Some(root.clone());
+        // The user expanded `a` while a full snapshot was still scanning.
+        panel.tree_generation = 1;
+        panel.tree_rows = vec![test_row("a", 0, true), test_row("a/inner.txt", 1, false)];
+        panel.tree_rows[0].expanded = true;
+        panel.rows.clone_from(&panel.tree_rows);
+
+        *panel.snapshot_slot.lock().unwrap() = Some(PanelSnapshot {
+            root,
+            files_wsl: None,
+            update: SnapshotUpdate::Rows {
+                rows: vec![test_row("a", 0, true)],
+                enumeration_ok: true,
+            },
+            tree_generation: 0,
+            git: None,
+        });
+        assert!(!panel.harvest_snapshot(), "a stale row set keeps the current tree");
+        assert_eq!(panel.file_rows().len(), 2);
+        assert!(panel.file_rows()[0].expanded);
+    }
+
+    fn git_repository() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        let mut command = std::process::Command::new("git");
+        command.args(["init", "-q"]).arg(directory.path());
+        assert!(crate::platform::process::hidden_command(&mut command).status().unwrap().success());
+        directory
+    }
+
+    fn test_row(path: &str, depth: usize, is_dir: bool) -> FileRow {
+        FileRow {
+            path: PathBuf::from(path),
+            guest_path: None,
+            name: path.rsplit('/').next().unwrap_or(path).to_owned(),
+            depth,
+            is_dir,
+            expanded: false,
+            is_parent: false,
+            ignored: false,
+        }
+    }
+
+    #[test]
+    fn snapshot_publishes_rows_before_ignore_annotations() {
+        let repo = git_repository();
+        let root = repo.path().to_owned();
+        std::fs::create_dir(root.join("generated")).unwrap();
+        std::fs::write(root.join("generated/out.txt"), b"x").unwrap();
+        std::fs::write(root.join("main.rs"), b"x").unwrap();
+        std::fs::write(root.join(".gitignore"), b"generated/\n").unwrap();
+
+        let mut published = Vec::new();
+        SidePanel::build_snapshot(
+            root,
+            None,
+            HashSet::new(),
+            0,
+            || None,
+            |snapshot| {
+                published.push(snapshot);
+            },
+        );
+
+        fn rows(snapshot: &PanelSnapshot) -> &[FileRow] {
+            match &snapshot.update {
+                SnapshotUpdate::Rows { rows, .. } => rows,
+                SnapshotUpdate::Ignored(_) => panic!("a full snapshot publishes rows"),
+            }
+        }
+        assert_eq!(published.len(), 2, "rows first, annotated rows second");
+        assert!(published[0].git.is_none(), "the first publication never waits for VCS");
+        assert!(
+            rows(&published[0]).iter().all(|row| !row.ignored),
+            "the first publication must not pay for `git check-ignore`"
+        );
+        assert!(published[1].git.is_some(), "the second publication completes the VCS slot");
+        let generated = rows(&published[1])
+            .iter()
+            .find(|row| row.name == "generated")
+            .expect("ignored directory row");
+        assert!(generated.ignored, "the second publication carries ignore marks");
+    }
+
+    #[test]
+    fn ignore_probing_is_skipped_outside_a_repository() {
+        let plain = tempfile::tempdir().unwrap();
+        let mut rows = vec![test_row("a.txt", 0, false)];
+        rows[0].path = plain.path().join("a.txt");
+        assert!(!SidePanel::mark_ignored(plain.path(), &mut rows), "no `.git`, no git process");
+        assert!(!rows[0].ignored);
+
+        let repo = git_repository();
+        std::fs::write(repo.path().join("a.txt"), b"x").unwrap();
+        let mut rows = vec![test_row("a.txt", 0, false)];
+        rows[0].path = repo.path().join("a.txt");
+        assert!(SidePanel::mark_ignored(repo.path(), &mut rows), "a repository is probed");
+    }
+
+    #[test]
+    fn expand_and_collapse_touch_only_the_clicked_subtree() {
+        let mut rows = vec![
+            test_row("root", 0, true),
+            test_row("root/a", 1, true),
+            test_row("root/a/inner.txt", 2, false),
+            test_row("root/b.txt", 1, false),
+        ];
+        rows[1].expanded = true;
+
+        assert!(SidePanel::collapse_subtree(&mut rows, Path::new("root/a")));
+        let names: Vec<_> = rows.iter().map(|row| row.name.as_str()).collect();
+        assert_eq!(names, ["root", "a", "b.txt"], "only the subtree disappears");
+        assert!(!rows[1].expanded);
+
+        let children = vec![test_row("root/a/inner.txt", 2, false)];
+        assert!(SidePanel::expand_subtree(&mut rows, Path::new("root/a"), children));
+        let names: Vec<_> = rows.iter().map(|row| row.name.as_str()).collect();
+        assert_eq!(names, ["root", "a", "inner.txt", "b.txt"], "children follow the directory");
+        assert!(rows[1].expanded);
     }
 
     #[test]
