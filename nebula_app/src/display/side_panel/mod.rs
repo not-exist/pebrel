@@ -117,6 +117,18 @@ pub enum VcsKind {
     SvnRepository,
 }
 
+/// How much of a repository one snapshot resolves. The Files view only renders
+/// working-tree state; the VCS drawer additionally consumes diff totals and
+/// commit history, which cost two extra `git` invocations per refresh.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GitSnapshotScope {
+    /// `git status` only: branch, staged/unstaged/conflicts.
+    #[default]
+    Status,
+    /// `git status` plus `diff --shortstat` and the recent commit log.
+    History,
+}
+
 /// Parsed `git status` snapshot.
 #[derive(Debug, Clone, Default)]
 pub struct GitInfo {
@@ -409,6 +421,9 @@ pub struct SidePanel {
     expanded: HashSet<PathBuf>,
     /// Git snapshot, `None` when the root isn't inside a work tree.
     git: Option<std::sync::Arc<GitInfo>>,
+    /// Depth covered by [`Self::git`]; `None` until the first snapshot lands.
+    /// 切到 VCS 视图时靠它判断要不要补一次历史刷新，避免重复 spawn git。
+    git_scope: Option<GitSnapshotScope>,
     /// Scroll offset in rows.
     pub scroll: usize,
     /// Files-view filter query; non-empty switches the tree to a flat list of
@@ -485,6 +500,8 @@ struct PanelSnapshot {
     /// `None` 表示目录行先行发布、VCS 仍在读取；`Some(None)` 才表示当前
     /// 目录不在仓库中。这样慢 WSL git 不会让 Files 一直显示空白。
     git: Option<Option<GitInfo>>,
+    /// 这份快照请求的深度；仅当 `git` 为 `Some(_)` 时有意义。
+    git_scope: GitSnapshotScope,
 }
 
 /// 工人 panic/提前返回也必须解锁；否则一次异常会让此窗口今后的所有刷新失效。
@@ -512,6 +529,7 @@ impl SidePanel {
             tree_rows: Vec::new(),
             expanded: HashSet::new(),
             git: None,
+            git_scope: None,
             scroll: 0,
             search: String::new(),
             search_focus: false,
@@ -559,6 +577,7 @@ impl SidePanel {
             return;
         }
         let resume_search = !self.open || self.view != PanelView::Files;
+        let switching_to_vcs = self.open && view == PanelView::Git;
         self.open = true;
         self.view = view;
         if view == PanelView::Git {
@@ -576,7 +595,9 @@ impl SidePanel {
             self.rows = self.tree_rows.clone();
         }
         self.scroll = 0;
-        self.needs_refresh = true;
+        // Files 视图仍按原有事件刷新目录与工作区状态；切到 VCS 视图时，
+        // 已带历史的快照直接复用，缺历史才在这里补一次 History 范围刷新。
+        self.needs_refresh = !(switching_to_vcs && self.git_snapshot_covers_vcs());
     }
 
     /// Adopt the focused pane's cwd, refreshing when the root changed or a
@@ -717,6 +738,12 @@ impl SidePanel {
         self.enumeration_failed = !snapshot.enumeration_ok;
         if let Some(git) = snapshot.git {
             self.git = git.map(std::sync::Arc::new);
+            self.git_scope = Some(snapshot.git_scope);
+            // 切到 VCS 视图后，早先的 Files 范围工人可能才落地：这份快照
+            // 不含 diff/历史，立刻补一次完整刷新，别等下一次人工事件。
+            if self.view == PanelView::Git && !self.git_snapshot_covers_vcs() {
+                self.needs_refresh = true;
+            }
         }
         true
     }
@@ -881,6 +908,18 @@ impl SidePanel {
         unstaged.contains(&absolute) || staged.contains(&absolute)
     }
 
+    /// VCS 视图消费的提交历史是否已在当前快照里。SVN 与"确认不在仓库中"
+    /// 没有可补的 git 历史，同样算作完整——切视图不必再探测。
+    fn git_snapshot_covers_vcs(&self) -> bool {
+        match (self.git_scope, self.git.as_deref()) {
+            (None, _) => false,
+            (Some(_), None) => true,
+            (Some(scope), Some(info)) => {
+                info.vcs != VcsKind::Git || scope == GitSnapshotScope::History
+            },
+        }
+    }
+
     /// 外部（右键菜单删除等文件系统变更）请求下一帧重建快照。
     pub fn request_refresh(&mut self) {
         self.needs_refresh = true;
@@ -934,11 +973,13 @@ impl SidePanel {
             self.tree_rows = Vec::new();
             self.search_memory = None;
             self.git = None;
+            self.git_scope = None;
             self.sync_file_index();
             return;
         };
-        // 快照工人一次只跑一个：fs 遍历 + 三个 git 子进程在渲染线程上曾是
-        // 切换视图卡顿的直接根因。工人在飞时再次请求就重挂 `needs_refresh`，
+        // 快照工人一次只跑一个：fs 遍历 +（按视图）一或三个 git 子进程在
+        // 渲染线程上曾是切换视图卡顿的直接根因。工人在飞时再次请求就重挂
+        // `needs_refresh`，
         // 落地后 `sync` 的下一帧自然补跑，不排队叠罗汉。
         if self.snapshot_running.swap(true, std::sync::atomic::Ordering::AcqRel) {
             self.needs_refresh = true;
@@ -957,6 +998,12 @@ impl SidePanel {
             .or_else(|| self.followed_cwd.clone())
             .unwrap_or_else(|| root.clone());
         let wsl = self.followed_wsl.clone();
+        // Files 视图只要工作区状态；diff 与提交历史只被 VCS 抽屉消费。
+        let scope = if self.view == PanelView::Git {
+            GitSnapshotScope::History
+        } else {
+            GitSnapshotScope::Status
+        };
         let running = std::sync::Arc::clone(&self.snapshot_running);
         let slot = std::sync::Arc::clone(&self.snapshot_slot);
         let worker = std::thread::spawn(move || {
@@ -974,6 +1021,7 @@ impl SidePanel {
                     rows: rows.clone(),
                     enumeration_ok,
                     git: None,
+                    git_scope: scope,
                 });
             }
             // 设置可强制只认 Git / SVN（混合仓库场景）；Auto 保持既有探测：
@@ -992,24 +1040,31 @@ impl SidePanel {
                         nebula_settings::VcsDisplayName::Svn
                     ) =>
                 {
-                    read_git_wsl(located)
+                    read_git_wsl(located, scope)
                 },
                 Some(_) => None,
                 None => match nebula_settings::RuntimeSettings::load().vcs_display {
-                    nebula_settings::VcsDisplayName::Git => read_git(&git_root),
+                    nebula_settings::VcsDisplayName::Git => read_git(&git_root, scope),
                     nebula_settings::VcsDisplayName::Svn => read_svn(&git_root),
                     nebula_settings::VcsDisplayName::Auto => {
                         if svn_dir_hint(&git_root) {
-                            read_svn(&git_root).or_else(|| read_git(&git_root))
+                            read_svn(&git_root).or_else(|| read_git(&git_root, scope))
                         } else {
-                            read_git(&git_root).or_else(|| read_svn(&git_root))
+                            read_git(&git_root, scope).or_else(|| read_svn(&git_root))
                         }
                     },
                 },
             };
             if let Ok(mut slot) = slot.lock() {
                 *slot =
-                    Some(PanelSnapshot { root, files_wsl, rows, enumeration_ok, git: Some(git) });
+                    Some(PanelSnapshot {
+                        root,
+                        files_wsl,
+                        rows,
+                        enumeration_ok,
+                        git: Some(git),
+                        git_scope: scope,
+                    });
             }
         });
         #[cfg(test)]

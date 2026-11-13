@@ -309,6 +309,7 @@ mod tests {
             rows: Vec::new(),
             enumeration_ok: true,
             git: None,
+            git_scope: GitSnapshotScope::Status,
         });
         assert!(panel.harvest_snapshot());
         assert_eq!(panel.git().map(|git| git.branch.as_str()), Some("keep-until-ready"));
@@ -319,6 +320,7 @@ mod tests {
             rows: Vec::new(),
             enumeration_ok: true,
             git: Some(None),
+            git_scope: GitSnapshotScope::Status,
         });
         assert!(panel.harvest_snapshot());
         assert!(panel.git().is_none());
@@ -1001,6 +1003,74 @@ mod tests {
         std::fs::write(linked.join(".git"), "gitdir: ../repo/.git/worktrees/linked").unwrap();
         assert_eq!(git_repository_root(&linked).as_deref(), Some(linked.as_path()));
     }
+}
+
+#[test]
+fn git_snapshot_scope_only_reads_what_the_active_view_consumes() {
+    use crate::git_worktree::status::STATUS_ARGS;
+    use std::cell::RefCell;
+
+    const STATUS: &str = "# branch.oid abc\0# branch.head main\0# branch.ab +1 -0\0";
+    const DIFF: &str = " 1 file changed, 7 insertions(+), 2 deletions(-)\n";
+    const LOG: &str = "\u{1e}deadbeef\u{1f}deadbee\u{1f}HEAD -> refs/heads/main\u{1f}subject\u{1f}Alice\u{1f}alice@example.test\u{1f}1700000000\u{1f}\n";
+
+    let status_calls = RefCell::new(Vec::<Vec<String>>::new());
+    let info = collect_git_info(GitSnapshotScope::Status, |args| {
+        status_calls.borrow_mut().push(args.iter().map(|arg| arg.to_string()).collect());
+        assert_eq!(args, STATUS_ARGS, "Files 范围只允许发 status");
+        Some(STATUS.to_owned())
+    })
+    .expect("status snapshot");
+    let status_calls = status_calls.into_inner();
+    assert_eq!(status_calls.len(), 1);
+    assert_eq!(status_calls[0].iter().map(String::as_str).collect::<Vec<_>>(), STATUS_ARGS);
+    assert_eq!((info.plus, info.minus), (0, 0));
+    assert!(info.history.is_empty());
+
+    let history_calls = RefCell::new(Vec::<Vec<String>>::new());
+    let info = collect_git_info(GitSnapshotScope::History, |args| {
+        history_calls.borrow_mut().push(args.iter().map(|arg| arg.to_string()).collect());
+        match args.first().copied() {
+            Some("status") => Some(STATUS.to_owned()),
+            Some("diff") => Some(DIFF.to_owned()),
+            Some("log") => Some(LOG.to_owned()),
+            other => panic!("unexpected git args: {other:?}"),
+        }
+    })
+    .expect("history snapshot");
+    let history_calls = history_calls.into_inner();
+    assert_eq!(history_calls.len(), 3);
+    assert_eq!(history_calls[0].iter().map(String::as_str).collect::<Vec<_>>(), STATUS_ARGS);
+    assert_eq!(
+        history_calls[1].iter().map(String::as_str).collect::<Vec<_>>(),
+        ["diff", "--shortstat", "HEAD"]
+    );
+    assert_eq!(history_calls[2].first().map(String::as_str), Some("log"));
+    assert_eq!((info.plus, info.minus), (7, 2));
+    assert_eq!(info.history.len(), 1);
+}
+
+#[test]
+fn switching_to_vcs_refreshes_only_until_history_is_cached() {
+    let mut panel = SidePanel::new();
+    panel.open = true;
+    panel.view = PanelView::Files;
+    panel.root = Some(PathBuf::from("/repo"));
+    panel.git = Some(std::sync::Arc::new(GitInfo {
+        vcs: VcsKind::Git,
+        branch: "main".to_owned(),
+        ..Default::default()
+    }));
+    panel.git_scope = Some(GitSnapshotScope::Status);
+
+    panel.toggle(PanelView::Git);
+    assert!(panel.needs_refresh, "没有 history 的 Files 快照必须补一次 VCS 刷新");
+
+    panel.view = PanelView::Files;
+    panel.git_scope = Some(GitSnapshotScope::History);
+    panel.needs_refresh = false;
+    panel.toggle(PanelView::Git);
+    assert!(!panel.needs_refresh, "已有 history 时切视图不应重复跑 git");
 }
 
 #[test]

@@ -788,9 +788,12 @@ impl SidePanel {
     }
 }
 
-/// Snapshot git state for `root`: branch, ±line counts, changed files./// `None` when git is missing or `root` isn't inside a work tree. Runs
-/// synchronously — callers throttle (see [`SidePanel::sync`]).
-pub(crate) fn read_git(root: &Path) -> Option<GitInfo> {
+/// Snapshot git state for `root`: branch, ±line counts, changed files.
+/// [`GitSnapshotScope::History`] additionally reads diff totals and the commit
+/// log; the Files view passes [`GitSnapshotScope::Status`] to skip those two
+/// subprocesses. `None` when git is missing or `root` isn't inside a work tree.
+/// Runs synchronously — callers throttle (see [`SidePanel::sync`]).
+pub(crate) fn read_git(root: &Path, scope: GitSnapshotScope) -> Option<GitInfo> {
     use std::process::Command;
     // `safe.directory` scoped to this one invocation: repos owned by another
     // user — most commonly a `\\wsl$\…` UNC root, where every file belongs to
@@ -801,7 +804,7 @@ pub(crate) fn read_git(root: &Path) -> Option<GitInfo> {
     // opt-in guards against.
     let safe_directory = format!("safe.directory={}", root.display());
     let location = root.display().to_string();
-    collect_git_info(|args| {
+    collect_git_info(scope, |args| {
         let mut cmd = Command::new("git");
         cmd.args(["-c", &safe_directory, "--no-optional-locks"]).args(args).current_dir(root);
         run_git(cmd, args, &location, None)
@@ -823,9 +826,12 @@ pub(crate) fn read_git(root: &Path) -> Option<GitInfo> {
 ///
 /// 代价是每次快照多一次 `wsl.exe` 进程往返（发行版没运行时还会把它拉起
 /// 来）。快照本来就在后台线程上、且有节流，不进渲染路径。
-pub(crate) fn read_git_wsl(located: &crate::shell_detect::WslCwd) -> Option<GitInfo> {
+pub(crate) fn read_git_wsl(
+    located: &crate::shell_detect::WslCwd,
+    scope: GitSnapshotScope,
+) -> Option<GitInfo> {
     let location = format!("{}:{}", located.distro, located.guest);
-    collect_git_info(|args| {
+    collect_git_info(scope, |args| {
         let mut cmd = crate::shell_detect::wsl_exec_command(&located.distro, None);
         cmd.args(["git", "-C", &located.guest, "--no-optional-locks"]).args(args);
         run_git(cmd, args, &location, Some(WSL_COMMAND_TIMEOUT))
@@ -860,8 +866,12 @@ pub(crate) fn run_git(
 }
 
 /// 宿主与 WSL 来宾两条运行路径共用的 porcelain 解析。`run` 收一组 git 参数、
-/// 回 stdout（失败即 `None`）。
-pub(crate) fn collect_git_info(run: impl Fn(&[&str]) -> Option<String>) -> Option<GitInfo> {
+/// 回 stdout（失败即 `None`）。`scope` 决定是否继续跑 diff 与 log：Files
+/// 视图只消费状态，VCS 抽屉才需要行数统计与提交历史。
+pub(crate) fn collect_git_info(
+    scope: GitSnapshotScope,
+    run: impl Fn(&[&str]) -> Option<String>,
+) -> Option<GitInfo> {
     use crate::git_worktree::status::{STATUS_ARGS, parse_status};
     let status = parse_status(&run(STATUS_ARGS)?).ok()?;
     let mut info =
@@ -877,6 +887,10 @@ pub(crate) fn collect_git_info(run: impl Fn(&[&str]) -> Option<String>) -> Optio
         if entry.unstaged() {
             info.unstaged.push((entry.worktree, entry.path));
         }
+    }
+
+    if scope == GitSnapshotScope::Status {
+        return Some(info);
     }
 
     // `x files changed, 140 insertions(+), 69 deletions(-)` → (140, 69).
